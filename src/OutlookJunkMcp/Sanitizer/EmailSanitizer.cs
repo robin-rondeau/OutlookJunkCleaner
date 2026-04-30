@@ -26,9 +26,28 @@ public sealed class EmailSanitizer
 
     private static readonly Regex MultiNewline = new(@"\n{3,}", RegexOptions.Compiled);
     private static readonly Regex SpaceTabRun = new(@"[ \t]{2,}", RegexOptions.Compiled);
+    // Inclusive: any sequence of alphanumeric/-hyphen labels separated by dots, ending with a
+    // 2-24 letter TLD. Greedy so multi-label domains like amazon.co.uk capture in full. Avoids
+    // the maintenance burden of a TLD allowlist (now 1500+ entries and growing — .clinic, .app,
+    // .academy, etc.). The trade-off is false positives on filenames like "report.pdf"; those
+    // are filtered via NonTldSuffixes below.
     private static readonly Regex DomainLike = new(
-        @"\b([a-z0-9][a-z0-9-]{0,62}\.(?:com|org|net|io|co|edu|gov|ca|uk|de|fr|ai|app|dev))\b",
+        @"\b([a-z0-9][a-z0-9-]{0,62}(?:\.[a-z0-9][a-z0-9-]{0,62})*\.([a-z]{2,24}))\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Common file extensions that look like TLDs but never are. Suppresses the bulk of false
+    // positives from filenames quoted in email body text. Anything not in this set gets treated
+    // as a real domain — including TLDs that don't exist yet.
+    private static readonly HashSet<string> NonTldSuffixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt",
+        "jpg", "jpeg", "png", "gif", "bmp", "svg", "webp", "ico", "tiff", "heic",
+        "mp3", "mp4", "wav", "mov", "avi", "mkv", "webm", "flac", "ogg",
+        "zip", "rar", "tar", "gz",
+        "exe", "dmg", "iso", "msi", "deb", "rpm",
+        "html", "htm", "css", "js", "json", "xml", "csv", "yaml", "yml", "md", "log",
+        "py", "java", "cs", "go", "rb", "php", "sh", "bat", "ps1",
+    };
 
     private static readonly HashSet<string> AlwaysDropTags = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -196,6 +215,9 @@ public sealed class EmailSanitizer
         foreach (Match m in DomainLike.Matches(visibleText))
         {
             var visibleHost = m.Groups[1].Value.ToLowerInvariant();
+            var suffix = m.Groups[2].Value;
+            if (NonTldSuffixes.Contains(suffix)) continue;
+
             if (!hrefHost.EndsWith(visibleHost, StringComparison.Ordinal)
                 && !visibleHost.EndsWith(hrefHost, StringComparison.Ordinal))
             {
