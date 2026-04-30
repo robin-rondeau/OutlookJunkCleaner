@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -12,13 +13,21 @@ namespace OutlookJunkAgent.Drivers;
 /// classifier) by registering a single `classify` tool and forcing tool_choice. The model
 /// physically cannot emit a free-form tool call or an off-schema decision; on schema violation
 /// (rare) the driver falls back to Ambiguous@0.0.
+///
+/// Resilience: retries on 429 / 529 / 5xx / network failures up to MaxAttempts with exponential
+/// backoff (±25% jitter), respecting the server's Retry-After header when present. Logs the
+/// Anthropic request-id on failure for support tickets, and usage tokens (incl. cache_read /
+/// cache_create) at Debug level so prompt-cache effectiveness is observable across a run.
 /// </summary>
 public sealed class AnthropicAgentDriver : IAgentDriver
 {
     private const string Endpoint = "https://api.anthropic.com/v1/messages";
     private const string ApiVersion = "2023-06-01";
     private const int MaxTokens = 256;
+    private const int MaxAttempts = 5;
     private const string ClassifyToolName = "classify";
+    private const string RequestIdHeader = "request-id";
+    private const string AnthropicRequestIdHeader = "anthropic-request-id";
 
     private readonly HttpClient _http;
     private readonly string _model;
@@ -59,16 +68,158 @@ public sealed class AnthropicAgentDriver : IAgentDriver
             },
         };
 
-        using var resp = await _http.PostAsJsonAsync(Endpoint, body, ct).ConfigureAwait(false);
-        var raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException(
-                $"Anthropic API error {(int)resp.StatusCode}: {Truncate(raw, 1000)}");
-        }
-
+        var raw = await SendWithRetryAsync(body, ct).ConfigureAwait(false);
         return ParseResponse(raw);
     }
+
+    private async Task<string> SendWithRetryAsync(JsonObject body, CancellationToken ct)
+    {
+        var rand = Random.Shared;
+
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            HttpResponseMessage? resp = null;
+            try
+            {
+                resp = await _http.PostAsJsonAsync(Endpoint, body, ct).ConfigureAwait(false);
+                var raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                var requestId = TryGetHeader(resp, RequestIdHeader)
+                    ?? TryGetHeader(resp, AnthropicRequestIdHeader);
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    LogUsage(raw, requestId);
+                    return raw;
+                }
+
+                if (!IsTransient(resp.StatusCode) || attempt == MaxAttempts)
+                {
+                    throw new InvalidOperationException(
+                        $"Anthropic API error {(int)resp.StatusCode} after {attempt} attempt(s) " +
+                        $"(request-id={requestId ?? "?"}): {Truncate(raw, 1000)}");
+                }
+
+                var delay = ComputeRetryDelay(attempt, resp.Headers, rand);
+                _log.LogWarning(
+                    "Anthropic {Status} on attempt {N}/{Max} (request-id={Rid}); retrying in {Delay}s",
+                    (int)resp.StatusCode, attempt, MaxAttempts, requestId ?? "?", delay.TotalSeconds);
+                resp.Dispose();
+                resp = null;
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex)
+            {
+                if (attempt == MaxAttempts)
+                {
+                    throw new InvalidOperationException(
+                        $"Anthropic network error after {MaxAttempts} attempts: {ex.Message}", ex);
+                }
+                var delay = ComputeBackoff(attempt, rand);
+                _log.LogWarning(ex,
+                    "Anthropic network error on attempt {N}/{Max}; retrying in {Delay}s",
+                    attempt, MaxAttempts, delay.TotalSeconds);
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                // HttpClient.Timeout fired — distinct from user cancellation.
+                if (attempt == MaxAttempts)
+                {
+                    throw new InvalidOperationException(
+                        $"Anthropic request timed out after {MaxAttempts} attempts: {ex.Message}", ex);
+                }
+                var delay = ComputeBackoff(attempt, rand);
+                _log.LogWarning(ex,
+                    "Anthropic timeout on attempt {N}/{Max}; retrying in {Delay}s",
+                    attempt, MaxAttempts, delay.TotalSeconds);
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                resp?.Dispose();
+            }
+        }
+
+        // Unreachable: the loop either returns on success or throws on the final attempt.
+        throw new InvalidOperationException("Anthropic retry loop exited unexpectedly.");
+    }
+
+    private static bool IsTransient(HttpStatusCode code)
+    {
+        var c = (int)code;
+        return c == 429        // rate / quota
+            || c == 529        // overloaded
+            || (c >= 500 && c <= 599);
+    }
+
+    private static TimeSpan ComputeRetryDelay(int attempt, HttpResponseHeaders headers, Random rand)
+    {
+        // If the server tells us when to retry, honour it as the floor (still add jitter).
+        if (headers.RetryAfter is { } ra)
+        {
+            if (ra.Delta is TimeSpan delta && delta > TimeSpan.Zero)
+            {
+                return AddJitter(delta, rand);
+            }
+            if (ra.Date is DateTimeOffset when)
+            {
+                var d = when - DateTimeOffset.UtcNow;
+                if (d > TimeSpan.Zero) return AddJitter(d, rand);
+            }
+        }
+        return ComputeBackoff(attempt, rand);
+    }
+
+    private static TimeSpan ComputeBackoff(int attempt, Random rand)
+    {
+        // 1s, 2s, 4s, 8s, 16s — capped at 60s — each with ±25% jitter.
+        var seconds = Math.Min(60.0, Math.Pow(2, attempt - 1));
+        return AddJitter(TimeSpan.FromSeconds(seconds), rand);
+    }
+
+    private static TimeSpan AddJitter(TimeSpan baseDelay, Random rand)
+    {
+        var ms = baseDelay.TotalMilliseconds;
+        var jitter = ms * (rand.NextDouble() * 0.5 - 0.25);
+        return TimeSpan.FromMilliseconds(Math.Max(50, ms + jitter));
+    }
+
+    private static string? TryGetHeader(HttpResponseMessage resp, string name)
+    {
+        if (resp.Headers.TryGetValues(name, out var values))
+        {
+            return values.FirstOrDefault();
+        }
+        return null;
+    }
+
+    private void LogUsage(string raw, string? requestId)
+    {
+        if (!_log.IsEnabled(LogLevel.Debug)) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            if (!doc.RootElement.TryGetProperty("usage", out var usage)) return;
+            var input = ReadInt(usage, "input_tokens");
+            var output = ReadInt(usage, "output_tokens");
+            var cacheRead = ReadInt(usage, "cache_read_input_tokens");
+            var cacheCreate = ReadInt(usage, "cache_creation_input_tokens");
+            _log.LogDebug(
+                "Anthropic usage: input={I} output={O} cache_read={CR} cache_create={CC} request-id={Rid}",
+                input, output, cacheRead, cacheCreate, requestId ?? "?");
+        }
+        catch
+        {
+            // Never let usage logging break the success path.
+        }
+    }
+
+    private static int ReadInt(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)
+            ? i
+            : 0;
 
     private ClassificationResult ParseResponse(string raw)
     {
