@@ -1,0 +1,33 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+*.swp
+
+# Publish output
+publish/
+out/
+
+# Logs
+logs/
+*.log
+
+# Local config / secrets
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+
+# MSAL token cache (machine-local, never commit)
+token.cache
+*.token.cache
+
+# Test coverage
+coverage/
+TestResults/
+
+# Plan workspace
+/home/
