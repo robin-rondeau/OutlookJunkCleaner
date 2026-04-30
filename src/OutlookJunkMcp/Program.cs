@@ -150,8 +150,12 @@ static async Task<(MailClient Mail, FolderResolver Folders)> BuildMailClientAsyn
 {
     var auth = await MsalAuth.CreateAsync(config.ClientId, loggerFactory.CreateLogger<MsalAuth>());
 
+    // Use the auth-provider-only constructor so the SDK installs its default middleware stack:
+    // RetryHandler (respects Retry-After on 429/503/504, exponential backoff, ≤3 retries),
+    // CompressionHandler, RedirectHandler, UserAgent + telemetry. Bypassing this by passing a
+    // plain HttpClient means a single throttled call aborts the run.
     var graphAuthProvider = new BearerTokenAuthProvider(auth);
-    var graph = new GraphServiceClient(new HttpClient(), graphAuthProvider);
+    var graph = new GraphServiceClient(graphAuthProvider);
 
     var folders = new FolderResolver(graph, config.TriageFolderName, loggerFactory.CreateLogger<FolderResolver>());
     await folders.ResolveAsync();
