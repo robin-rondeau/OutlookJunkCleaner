@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "outlook-junk": {
+      "command": "bin/OutlookJunkMcp.exe",
+      "args": [],
+      "env": {}
+    }
+  }
+}
