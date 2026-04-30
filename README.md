@@ -6,7 +6,7 @@ messages against a user-maintained rubric, and either marks confident junk as re
 (Phase A) or eventually deletes it (Phase B). Ambiguous mail is moved to a Triage folder
 for manual review.
 
-The architecture is designed around two security and portability properties:
+The architecture is designed around three properties:
 
 - **Folder-scoped boundary.** Microsoft Graph has no folder-level OAuth scopes, so the boundary
   is enforced in code by an MCP server that holds the credentials and only exposes a narrow
@@ -14,6 +14,13 @@ The architecture is designed around two security and portability properties:
 - **LLM-provider portability.** A small custom C# host drives the cron run against any provider
   (default: Anthropic Claude). To swap providers later, write a second `IAgentDriver` and change
   one env var. No other piece changes.
+- **Prompt-injection hardening.** Email content is attacker-controlled. The host classifies one
+  message at a time with a fresh LLM context (no cross-message contamination), feeds the LLM
+  a server-side-sanitized payload (HTML stripped, unicode-formatting code points removed,
+  links/images extracted into structured fields) wrapped in a per-run random delimiter, and
+  forces the LLM into an output-constrained tool schema (`{action, confidence, reason}`) so it
+  cannot freely call mailbox-mutating tools. The host translates the classification into the
+  appropriate MCP call. The MCP server additionally refuses ids it didn't surface in this session.
 
 See `PLAN.md` for the design rationale.
 
@@ -25,14 +32,20 @@ See `PLAN.md` for the design rationale.
    v
 [OutlookJunkAgent.exe]   <- the cron-driven host (LLM-swappable)
    |--- spawns MCP server as child process (stdio)
-   |--- discovers tools advertised by the server
-   |--- loads rubric.md -> builds system prompt
-   '--- agent loop <-> LLM provider (Anthropic Messages API by default)
+   |--- discovers tool list (used to detect Phase A vs Phase B)
+   |--- loads rubric.md -> builds stable cached system prompt
+   '--- per-message classifier loop:
+        for each unread Junk message:
+          mcp.get_message -> Spotlighter wraps in random delimiters
+          driver.ClassifyAsync (one-shot, fresh LLM context)
+          host dispatches mark_as_read | move_to_triage | delete_from_junk
                     |
                     v
 [OutlookJunkMcp.exe]   <- the boundary (single owner of credentials)
    |--- MSAL.NET -> Microsoft Graph -> user's mailbox
-   '--- exposes 5 (Phase A) or 6 (Phase B) tools, folder-allow-listed
+   |--- sanitizes email content (HTML strip, unicode hygiene, link/image extraction)
+   |--- per-session id allow-set (refuses unknown ids)
+   '--- exposes 6 (Phase A) or 7 (Phase B) tools, folder-allow-listed
 ```
 
 Tool surface (Phase A):
@@ -138,9 +151,13 @@ On the always-on Windows machine:
    ```powershell
    .\bin\OutlookJunkMcp.exe --self-test
    # Expected: prints "Junk: N (M unread)\nTriage: K\nDeleteEnabled: False"
+
+   .\bin\OutlookJunkMcp.exe --test-sanitizer
+   # Expected: 22 / 22 sanitizer self-tests passed
+   # Runs the in-process EmailSanitizer assertion suite. No auth needed.
    ```
 
-7. **Smoke-test** the agent host (dry-run - does not call any mutating tool):
+7. **Smoke-test** the agent host (dry-run - classifies but does not mutate the mailbox):
 
    ```powershell
    .\bin\OutlookJunkAgent.exe --dry-run
@@ -228,7 +245,7 @@ To run against a different provider:
 The full source has been written but the solution has **not yet been built** - the
 development environment that produced it didn't have the .NET SDK available. First
 local build is expected to surface a small number of API-shape adjustments,
-specifically in two areas:
+specifically in three areas:
 
 - **`ModelContextProtocol` C# SDK** (pinned to `0.6.0`). Type names like
   `CallToolResult` / `CallToolResponse`, `Content` / `ContentBlock`, and the exact tool-schema
@@ -239,7 +256,12 @@ specifically in two areas:
 - **`Microsoft.Graph` v5 SDK** request-builder paths (`Me.Messages[id].Move.PostAsync(...)`,
   `MovePostRequestBody`). These are stable from 5.40+ but the namespace import may need
   adjustment depending on the exact patch version.
+- **`HtmlAgilityPack`** (pinned to `1.11.65`) — used by `EmailSanitizer` for HTML→text. The
+  `HtmlNode` / `HtmlTextNode` / `HtmlEntity` API has been stable for years; mostly a confidence
+  check that the package resolves.
 
 Run `dotnet build -c Release` from the repo root after install and report any errors;
-the rest of the design (folder allow-list, MSAL flow, agent loop, Phase A/B gating) is
-provider-stable and shouldn't need rework.
+the rest of the design (folder allow-list, MSAL flow, classifier dispatch, Phase A/B gating,
+sanitizer pipeline) is provider-stable and shouldn't need rework. After build, run
+`bin\OutlookJunkMcp.exe --test-sanitizer` to verify the sanitizer transforms before
+exercising the live mailbox path.

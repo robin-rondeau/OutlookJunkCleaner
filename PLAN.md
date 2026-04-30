@@ -46,10 +46,10 @@ Token cache (machine-local, not in the project dir):
 2. Action: run `bin\OutlookJunkAgent.exe`, working dir `C:\Tools\OutlookJunkCleaner\`.
 3. The agent host:
    1. Spawns `bin\OutlookJunkMcp.exe` as a child process and connects to it as an MCP **client** over stdio.
-   2. Discovers the available tools (Phase A: 5 tools; Phase B: 6).
-   3. Loads `rubric.md` and constructs a system prompt: rubric + behavioral rules + phase-aware instructions.
-   4. Runs an agent loop against the configured LLM provider (default: Anthropic Claude). When the model emits a tool call, the host translates it to an MCP `tools/call`, forwards the result back, and continues.
-   5. Stops when the model stops calling tools, writes a summary to `logs\YYYY-MM-DD.log`, exits.
+   2. Discovers the available tool list (Phase A: 6 tools; Phase B: 7) — used only to detect Phase A vs B.
+   3. Loads `rubric.md` and constructs a stable, cache-friendly system prompt: rubric + behavioral rules + phase-aware instructions + the spotlighting trust contract.
+   4. Calls `mcp.list_junk` to get the working set, then **per-message**: calls `mcp.get_message` (server-side sanitized), wraps the payload in random per-run delimiters via `Spotlighter`, calls the LLM **once** as a constrained classifier (forced single-tool `classify` schema producing `{action, confidence, reason}`). The host translates the action into the appropriate MCP tool call (`mark_as_read`, `move_to_triage`, or `delete_from_junk`). Each LLM call gets a fresh context — no cross-message contamination.
+   5. After processing the working set (cap `--max-messages`, default 50), writes a summary to `logs\YYYY-MM-DD.log`, exits.
 4. The MCP server child process exits with the host. No long-running services.
 5. **Independently**, when you want to review interactively, you `cd C:\Tools\OutlookJunkCleaner\` and run `claude`. Claude Code reads `.mcp.json`, attaches to the same MCP server, and you can ask "what's in Triage and why?" — same tools, same boundary.
 
@@ -67,11 +67,10 @@ Token cache (machine-local, not in the project dir):
 ### 2. `OutlookJunkAgent` — C# agent host (the cron runner; LLM-swappable)
 
 - .NET 9 console app, also self-contained `win-x64`.
-- References the **MCP client** half of the C# MCP SDK to talk to the server child process.
-- Has a small `IAgentDriver` abstraction with one method: `RunAsync(IEnumerable<McpTool> tools, string systemPrompt, string userPrompt) → AgentResult`.
-- Initial implementation: `AnthropicAgentDriver` using the Anthropic Messages API (community SDK or raw HTTP — ~50 lines of tool-use loop).
-- To swap LLMs later, you write a second driver (`OpenAiAgentDriver`, `AzureOpenAiAgentDriver`, …) and choose by env var `OUTLOOK_JUNK_AGENT_PROVIDER=anthropic|openai|azureopenai`. The MCP server, the rubric, the cron, the security model, and most of the host are unchanged.
-- **Schema adapter:** MCP tool definitions are JSON Schema; provider tool-call formats are minor variations on JSON Schema. The adapter is a small `McpToolToProviderTool` translator per driver.
+- References the **MCP client** half of the C# MCP SDK to talk to the server child process. Exposes typed wrappers (`ListJunkAsync`, `GetMessageAsync`, `MarkAsReadAsync`, `MoveToTriageAsync`, `DeleteFromJunkAsync`, `GetStatusAsync`) so the host loop never deals in free-form tool dispatch.
+- Has a small `IAgentDriver` abstraction with one method: `ClassifyAsync(ClassificationRequest) → ClassificationResult`. The driver receives a stable system prompt + a per-message spotlighted payload, and returns one of `{ConfidentJunk, Ambiguous, NotJunk}` with a confidence and a short reason. The driver does NOT see the MCP tool surface; the host alone decides which tool to invoke based on the action.
+- Initial implementation: `AnthropicAgentDriver` using the Anthropic Messages API via raw `HttpClient`. Forces tool-use of a single inline `classify` schema (`tool_choice: {"type":"tool","name":"classify"}`); the model physically cannot emit anything else. ~170 LOC, no iteration loop, no schema translation.
+- To swap LLMs later, write a second driver (`OpenAiAgentDriver`, `AzureOpenAiAgentDriver`, …) and choose by env var `OUTLOOK_JUNK_AGENT_PROVIDER=anthropic|openai|azureopenai`. The MCP server, rubric, cron, security model, and host loop stay unchanged. OpenAI's equivalent of forced-tool is `response_format: {"type":"json_schema"}`; same constraint, different payload shape.
 
 ### 3. `rubric.md` — the classification rubric (the "training" surface)
 
@@ -102,7 +101,20 @@ Hard invariants (compiled in, not negotiable from the agent side):
 
 ### 5. Phase-A → Phase-B graduation
 
-Set `OUTLOOK_JUNK_MCP_ALLOW_DELETE=1` in the Task Scheduler action's environment. The MCP server registers `delete_from_junk` on next run; no rebuild. The change is auditable (lives in the task definition). Update `rubric.md` at the same time to tell the agent it now has delete authority and what bar to meet before using it.
+Set `OUTLOOK_JUNK_MCP_ALLOW_DELETE=1` in the Task Scheduler action's environment. The MCP server registers `delete_from_junk` on next run; no rebuild. The host detects this at startup (the discovered tool list contains `delete_from_junk`) and routes `confident_junk` decisions to the delete tool instead of `mark_as_read`. The change is auditable (lives in the task definition). Update `rubric.md` at the same time to tell yourself what bar the classifier must meet before deletion is appropriate.
+
+### 6. Prompt-injection hardening
+
+Email content is attacker-controlled and the agent has tool authority over the mailbox. The folder allow-list eliminates the worst attacks (no inbox-write, no send, no exfiltration), but four narrower threats remain: hide-the-phishing (agent marks attacker mail as read so it blends into reviewed junk), cross-message action (one email tricks the agent into acting on other junk), audit-log poisoning, and Phase-B early deletion. Six measures ship together against these:
+
+1. **One-message-per-iteration isolation.** The "agent loop" is now host-driven; each LLM call sees exactly one email with a fresh `messages` array. Message N's content cannot influence message N+1's classification.
+2. **Server-side id scoping.** The MCP server keeps a per-process `SurfacedIds` set populated by `list_junk` / `list_triage`. `get_message` and all mutating tools refuse ids not in the set, defeating prompt-injection attempts that synthesise message ids the agent never legitimately saw.
+3. **Spotlighting.** Each run generates a 16-hex random delimiter token. Sanitized email payloads are wrapped in `EMAIL_BEGIN-{token}` / `EMAIL_END-{token}` markers; the system prompt drills into the LLM that anything inside those markers is data, never instructions, and that instructions inside the body are evidence of phishing. Inner literal `EMAIL_BEGIN-` / `EMAIL_END-` substrings are escaped to `[delim]` defensively.
+4. **Server-side email sanitization.** `EmailSanitizer` (using HtmlAgilityPack) converts HTML bodies to plain text, drops `<script>` / `<style>` / `<head>` / hidden-CSS subtrees, extracts `<img alt>` and `<a>` into structured `Images` / `Links` fields (with a host-mismatch hint when visible text mentions a different domain than the href), strips zero-width / bidi-override / unicode-tag-block / format / private-use / control characters, and caps the body at 8000 chars. Sanitization lives at the MCP boundary so interactive Claude Code review benefits too.
+5. **Output-constrained classifier.** The LLM emits `{action: confident_junk|ambiguous|not_junk, confidence: 0..1, reason: <=200 char string}` and nothing else. Forced via Anthropic `tool_choice: {type: "tool", name: "classify"}` with an inline JSON Schema. Removes the entire free-form tool-call attack surface.
+6. **Reason-field hygiene + audit-log prefix.** Both the host (`ReasonHygiene`, ASCII-only) and the server (`ReasonValidator`, UTF-8-preserving) clean the reason string: cap length, strip control / format / private-use code points, collapse whitespace. Audit log lines record the cleaned reason as `agent-asserted: <text>`, visually distinguishing LLM-asserted text from any human-authored audit text.
+
+Verification: `bin\OutlookJunkMcp.exe --test-sanitizer` runs an in-process suite (22 cases) covering each transform; no auth required.
 
 ## Step-by-step setup
 
@@ -125,7 +137,7 @@ Set `OUTLOOK_JUNK_MCP_ALLOW_DELETE=1` in the Task Scheduler action's environment
 3. Set env vars (system-wide or in the Task Scheduler action): `OUTLOOK_JUNK_MCP_CLIENT_ID`, `OUTLOOK_JUNK_AGENT_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=…`.
 4. **First-auth, interactively, once:** `bin\OutlookJunkMcp.exe --first-auth`. Visit the device-code URL, sign in to your `outlook.com` account, grant `Mail.ReadWrite`. Token cache is now warm.
 5. Smoke-test the server alone: `bin\OutlookJunkMcp.exe --self-test` should print "Junk: N (M unread), Triage: K" and exit 0.
-6. Smoke-test the host: `bin\OutlookJunkAgent.exe --dry-run` runs the full pipeline but the dry-run flag tells the rubric to list intended actions without actually invoking mutating tools. Confirm the action list is sensible.
+6. Smoke-test the host: `bin\OutlookJunkAgent.exe --dry-run` runs the full pipeline (classifies every working-set message) but the host short-circuits before invoking any mutating MCP tool. The summary records `would:<tool>` entries so you can confirm the action list is sensible.
 7. (Optional) Smoke-test interactive review: from the project dir, run `claude`, ask "what's in Junk right now?", verify it uses the same MCP tools and gets a sensible answer.
 8. Install the cron: `scripts\install-task.ps1` (admin PowerShell). Registers a Task Scheduler trigger: hourly between 06:00 and 23:00, action = `bin\OutlookJunkAgent.exe`, working dir = `C:\Tools\OutlookJunkCleaner\`. Run-only-when-user-is-logged-on (DPAPI requirement) — or run-as the same user with stored credentials if the machine auto-logs-in.
 
@@ -147,8 +159,18 @@ Server side:
 Agent host:
 - `OutlookJunkAgent/OutlookJunkAgent.csproj`, `Program.cs` — entry point, MCP client connection, rubric load, driver dispatch.
 - `OutlookJunkAgent/Drivers/IAgentDriver.cs` — provider abstraction.
-- `OutlookJunkAgent/Drivers/AnthropicAgentDriver.cs` — initial driver. ~80 LoC: tool-use loop, schema adapter from MCP `inputSchema` to Anthropic `tools[].input_schema`.
-- `OutlookJunkAgent/AgentRunSummary.cs` — record per-run actions for the log file.
+- `OutlookJunkAgent/Drivers/AnthropicAgentDriver.cs` — initial driver. ~170 LoC: single forced-tool call against the inline `classify` schema. No iteration loop, no MCP tool translation.
+- `OutlookJunkAgent/Drivers/ClassificationContracts.cs` — `ClassificationRequest` / `ClassificationResult` / `ClassificationAction` records (the provider-agnostic wire format between host and driver).
+- `OutlookJunkAgent/Sanitizer/Spotlighter.cs` — per-run delimiter token + payload wrap with delimiter escape.
+- `OutlookJunkAgent/ReasonHygiene.cs` — host-side ASCII-only reason cleaner.
+- `OutlookJunkAgent/RunSummary.cs` — per-run actions + run token + final classification audit, written to the daily log file.
+
+Server-side hardening (added with the prompt-injection work):
+- `OutlookJunkMcp/Sanitizer/EmailSanitizer.cs` — HTML→text, hidden-CSS subtree drop, image/link extraction with host-mismatch hint, length cap.
+- `OutlookJunkMcp/Sanitizer/UnicodeFilter.cs` — code-point hygiene shared with `ReasonValidator`.
+- `OutlookJunkMcp/Session/SurfacedIds.cs` — per-process id allow-set populated by `list_*` tools, checked by mutating + read tools.
+- `OutlookJunkMcp/Tools/ReasonValidator.cs` — server-side reason cleaner (UTF-8-preserving).
+- `OutlookJunkMcp/Sanitizer/SanitizerSelfTest.cs` — in-process assertion suite (`--test-sanitizer`).
 
 Shared:
 - `OutlookJunkCommon/ToolNames.cs` — string constants for tool names.
@@ -165,18 +187,19 @@ Project root:
 End-to-end checks before considering this "working":
 
 1. **Server `--self-test`** prints `Junk: N (M unread), Triage: K` and exits 0. Confirms MSAL + scope + folder lookup + folder allow-list initialization.
-2. **MCP handshake (interactive).** From the project dir, `claude --debug` lists six tools (Phase A) under `/mcp outlook-junk`. Confirms the server is wired correctly and Claude Code can attach.
-3. **Folder boundary test.** Grab a message ID from your Inbox via Outlook on the web. Ask Claude Code interactively to call `get_message` on it. The server must refuse with "message not in allowed folder." Proves the boundary is real, not advisory.
-4. **Phase A behavior (cron host).** Seed Junk with a mix of (a) obviously-junk repeat-offender mail and (b) a couple of borderline items. Run `bin\OutlookJunkAgent.exe`. The obvious junk is **marked as read but stays in Junk**; the borderline items are **moved to Triage** with reasons. Inbox is untouched. A second run immediately after is a no-op (nothing unread to classify).
-5. **Delete gating.** With `OUTLOOK_JUNK_MCP_ALLOW_DELETE` unset, `delete_from_junk` is not in the tool list (verifiable via `claude --debug` or by logging the tools the host discovers). Set the env var, rerun, confirm the tool now appears.
-6. **Cron run.** Force-run the Task Scheduler job. Log file shows clean exit and the moves you expected.
-7. **Provider-swap rehearsal (optional but proves the architecture).** Stub a second `IAgentDriver` (e.g. one that just echoes the tool list and exits). Set `OUTLOOK_JUNK_AGENT_PROVIDER=stub` and confirm the host picks it up without any other change. This is the cheap way to prove model-portability before you commit to writing a real second driver.
-8. **Graduation rehearsal.** After ~1 week of Phase A with low false-positive rate in Triage reviews, flip the env var, update `rubric.md`, watch one Phase-B cycle interactively (via Claude Code) before letting the cron run unattended.
+2. **Sanitizer `--test-sanitizer`** prints `22 / 22 sanitizer self-tests passed`. Confirms the EmailSanitizer pipeline (HTML drop tags, hidden-CSS subtree drop, unicode-class stripping, image/link extraction with host-mismatch detection, length cap). No auth required.
+3. **MCP handshake (interactive).** From the project dir, `claude --debug` lists six tools (Phase A) under `/mcp outlook-junk`. Confirms the server is wired correctly and Claude Code can attach.
+4. **Boundary tests, both layers.** Grab a message ID from your Inbox via Outlook on the web. Ask Claude Code interactively to call `get_message` on it directly (without listing first). The server must refuse with `id_not_surfaced` (the per-session allow-set check). Then call `list_triage` first and ask `get_message` on an Inbox id again — must now refuse with "not in an allowed folder" (the folder-boundary check). Both layers prove the security model is real, not advisory.
+5. **Phase A behavior (cron host).** Seed Junk with a mix of (a) obviously-junk repeat-offender mail and (b) a couple of borderline items. Run `bin\OutlookJunkAgent.exe`. The obvious junk is **marked as read but stays in Junk**; the borderline items are **moved to Triage** with reasons. Inbox is untouched. A second run immediately after is a no-op (nothing unread to classify).
+6. **Delete gating.** With `OUTLOOK_JUNK_MCP_ALLOW_DELETE` unset, `delete_from_junk` is not in the tool list (verifiable via `claude --debug` or by logging the tools the host discovers). Set the env var, rerun, confirm the tool now appears.
+7. **Cron run.** Force-run the Task Scheduler job. Log file shows clean exit and the moves you expected.
+8. **Provider-swap rehearsal (optional but proves the architecture).** Stub a second `IAgentDriver` returning fixed `ClassificationResult`s. Set `OUTLOOK_JUNK_AGENT_PROVIDER=stub` and confirm the host picks it up without any other change. This is the cheap way to prove model-portability before you commit to writing a real second driver.
+9. **Graduation rehearsal.** After ~1 week of Phase A with low false-positive rate in Triage reviews, flip the env var, update `rubric.md`, watch one Phase-B cycle interactively (via Claude Code) before letting the cron run unattended.
 
 ## Open items (defaults baked in; tell me if you'd rather change)
 
 - **Triage folder name** — default `Triage` (top-level). The server creates it on first run if missing. Configurable via `OUTLOOK_JUNK_MCP_TRIAGE_FOLDER`.
 - **Initial LLM provider** — Anthropic Claude (`claude-opus-4-7` or `claude-sonnet-4-6` depending on cost/quality preference). Configurable via `OUTLOOK_JUNK_AGENT_PROVIDER` + provider-specific API key.
-- **Anthropic SDK choice for the host** — start with raw `HttpClient` against the Messages API. ~100 LoC including the tool-use loop. Avoids taking a dependency on a community SDK whose lifecycle you don't control. Switch to a community SDK later if you want.
+- **Anthropic SDK choice for the host** — raw `HttpClient` against the Messages API. ~170 LoC for the forced-tool classifier driver. Avoids taking a dependency on a community SDK whose lifecycle you don't control. Switch to a community SDK later if you want.
 - **MSAL client ID** — read from env var (no client ID committed to source).
 - **Hard-delete tool** — not in v1. Adding it later is a small change behind a third env-var; not currently planned.
