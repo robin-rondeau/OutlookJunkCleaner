@@ -3,99 +3,133 @@ using Microsoft.Graph;
 using Microsoft.Graph.Me.Messages.Item.Move;
 using Microsoft.Graph.Models;
 using OutlookJunkCommon;
+using OutlookJunkMcp.Sanitizer;
+using OutlookJunkMcp.Session;
+using OutlookJunkMcp.Tools;
 
 namespace OutlookJunkMcp.Graph;
 
 /// <summary>
 /// Folder-allow-listed wrapper around Microsoft Graph mail operations. Every method that takes
-/// a message ID re-validates that the message is currently in an allowed folder before acting.
-/// The agent only ever sees opaque IDs returned from these methods; it cannot reach Inbox or
-/// any other folder through this surface.
+/// a message ID re-validates that the message is currently in an allowed folder before acting,
+/// AND that the id was previously surfaced to the caller via list_junk or list_triage in this
+/// session — defeating prompt-injection attempts that synthesise message ids the agent never
+/// legitimately saw. The agent only ever sees opaque IDs returned from these methods; it cannot
+/// reach Inbox or any other folder through this surface.
 /// </summary>
 public sealed class MailClient
 {
     private readonly GraphServiceClient _graph;
     private readonly FolderResolver _folders;
+    private readonly EmailSanitizer _sanitizer;
+    private readonly SurfacedIds _surfaced;
     private readonly ILogger<MailClient> _log;
 
     private const string SelectMessageList = "id,subject,from,receivedDateTime,isRead,hasAttachments,bodyPreview";
     private const string SelectMessageDetails = "id,parentFolderId,subject,from,receivedDateTime,isRead,hasAttachments,body,internetMessageHeaders";
 
-    public MailClient(GraphServiceClient graph, FolderResolver folders, ILogger<MailClient> log)
+    public MailClient(
+        GraphServiceClient graph,
+        FolderResolver folders,
+        EmailSanitizer sanitizer,
+        SurfacedIds surfaced,
+        ILogger<MailClient> log)
     {
         _graph = graph;
         _folders = folders;
+        _sanitizer = sanitizer;
+        _surfaced = surfaced;
         _log = log;
     }
 
     public async Task<IReadOnlyList<JunkMessageInfo>> ListJunkAsync(int limit, int? sinceHours, bool includeRead, CancellationToken ct)
     {
-        return await ListInFolderAsync(_folders.JunkFolderId, limit, sinceHours, includeRead, ct).ConfigureAwait(false);
+        var msgs = await ListInFolderAsync(_folders.JunkFolderId, limit, sinceHours, includeRead, ct).ConfigureAwait(false);
+        _surfaced.Add(msgs.Select(m => m.Id));
+        return msgs;
     }
 
     public async Task<IReadOnlyList<JunkMessageInfo>> ListTriageAsync(int limit, CancellationToken ct)
     {
-        return await ListInFolderAsync(_folders.TriageFolderId, limit, sinceHours: null, includeRead: true, ct).ConfigureAwait(false);
+        var msgs = await ListInFolderAsync(_folders.TriageFolderId, limit, sinceHours: null, includeRead: true, ct).ConfigureAwait(false);
+        _surfaced.Add(msgs.Select(m => m.Id));
+        return msgs;
     }
 
     public async Task<MessageDetails> GetMessageAsync(string id, CancellationToken ct)
     {
+        CheckIdSurfaced(id);
         var msg = await FetchAndValidateAsync(id, requireJunk: false, ct).ConfigureAwait(false);
         var folderName = msg.ParentFolderId == _folders.JunkFolderId ? "Junk" : "Triage";
 
         var listUnsub = ExtractHeader(msg, "List-Unsubscribe");
         var relevant = ExtractRelevantHeaders(msg);
-        var sender = msg.From?.EmailAddress?.Address ?? "<unknown>";
-        var senderDomain = sender.Contains('@', StringComparison.Ordinal) ? sender[(sender.IndexOf('@') + 1)..] : "<none>";
+        var rawSender = msg.From?.EmailAddress?.Address ?? "<unknown>";
+        var sender = _sanitizer.SanitizeShortText(rawSender, EmailSanitizer.MaxSenderChars);
+        var senderDomain = sender.Contains('@', StringComparison.Ordinal)
+            ? sender[(sender.IndexOf('@') + 1)..]
+            : "<none>";
+        var subject = _sanitizer.SanitizeShortText(msg.Subject, EmailSanitizer.MaxSubjectChars);
+        var isHtml = msg.Body?.ContentType == BodyType.Html;
+        var sanitized = _sanitizer.SanitizeBody(msg.Body?.Content, isHtml);
 
         return new MessageDetails(
             Id: msg.Id ?? id,
             Folder: folderName,
             Sender: sender,
             SenderDomain: senderDomain,
-            Subject: msg.Subject ?? "",
+            Subject: subject,
             ReceivedAt: msg.ReceivedDateTime ?? DateTimeOffset.MinValue,
             IsRead: msg.IsRead ?? false,
             HasAttachments: msg.HasAttachments ?? false,
-            Body: msg.Body?.Content ?? "",
+            Body: sanitized.Body,
+            BodyTruncated: sanitized.Truncated,
+            Images: sanitized.Images,
+            Links: sanitized.Links,
             ListUnsubscribe: listUnsub,
             RelevantHeaders: relevant);
     }
 
     public async Task<MutationResult> MarkAsReadAsync(string id, string reason, CancellationToken ct)
     {
+        CheckIdSurfaced(id);
         await FetchAndValidateAsync(id, requireJunk: true, ct).ConfigureAwait(false);
+        var cleanedReason = ReasonValidator.Clean(reason);
 
         await _graph.Me.Messages[id].PatchAsync(
             new Message { IsRead = true },
             cancellationToken: ct).ConfigureAwait(false);
 
-        _log.LogInformation("AUDIT mark_as_read id={Id} reason={Reason}", id, reason);
-        return new MutationResult(id, ToolNames.MarkAsRead, "marked-read-in-junk", reason);
+        _log.LogInformation("AUDIT mark_as_read id={Id} reason=\"agent-asserted: {Reason}\"", id, cleanedReason);
+        return new MutationResult(id, ToolNames.MarkAsRead, "marked-read-in-junk", cleanedReason);
     }
 
     public async Task<MutationResult> MoveToTriageAsync(string id, string reason, CancellationToken ct)
     {
+        CheckIdSurfaced(id);
         await FetchAndValidateAsync(id, requireJunk: true, ct).ConfigureAwait(false);
+        var cleanedReason = ReasonValidator.Clean(reason);
 
         await _graph.Me.Messages[id].Move.PostAsync(
             new MovePostRequestBody { DestinationId = _folders.TriageFolderId },
             cancellationToken: ct).ConfigureAwait(false);
 
-        _log.LogInformation("AUDIT move_to_triage id={Id} reason={Reason}", id, reason);
-        return new MutationResult(id, ToolNames.MoveToTriage, "moved-junk-to-triage", reason);
+        _log.LogInformation("AUDIT move_to_triage id={Id} reason=\"agent-asserted: {Reason}\"", id, cleanedReason);
+        return new MutationResult(id, ToolNames.MoveToTriage, "moved-junk-to-triage", cleanedReason);
     }
 
     public async Task<MutationResult> DeleteFromJunkAsync(string id, string reason, CancellationToken ct)
     {
+        CheckIdSurfaced(id);
         await FetchAndValidateAsync(id, requireJunk: true, ct).ConfigureAwait(false);
+        var cleanedReason = ReasonValidator.Clean(reason);
 
         await _graph.Me.Messages[id].Move.PostAsync(
             new MovePostRequestBody { DestinationId = _folders.DeletedItemsFolderId },
             cancellationToken: ct).ConfigureAwait(false);
 
-        _log.LogInformation("AUDIT delete_from_junk id={Id} reason={Reason}", id, reason);
-        return new MutationResult(id, ToolNames.DeleteFromJunk, "moved-junk-to-deleted-items", reason);
+        _log.LogInformation("AUDIT delete_from_junk id={Id} reason=\"agent-asserted: {Reason}\"", id, cleanedReason);
+        return new MutationResult(id, ToolNames.DeleteFromJunk, "moved-junk-to-deleted-items", cleanedReason);
     }
 
     public async Task<StatusInfo> GetStatusAsync(bool deleteEnabled, CancellationToken ct)
@@ -109,6 +143,20 @@ public sealed class MailClient
             TriageCount: triageFolder?.TotalItemCount ?? 0,
             DeleteEnabled: deleteEnabled,
             AllowedFolders: ["Junk", "Triage"]);
+    }
+
+    private void CheckIdSurfaced(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new ArgumentException("Message id is required.", nameof(id));
+        }
+        if (!_surfaced.Contains(id))
+        {
+            throw new InvalidOperationException(
+                "id_not_surfaced: id was not returned by list_junk or list_triage in this session. " +
+                "Call list_junk first.");
+        }
     }
 
     private async Task<IReadOnlyList<JunkMessageInfo>> ListInFolderAsync(
@@ -143,12 +191,12 @@ public sealed class MailClient
             var listUnsub = await TryGetListUnsubscribeAsync(m.Id, ct).ConfigureAwait(false);
             results.Add(new JunkMessageInfo(
                 Id: m.Id ?? "",
-                Sender: m.From?.EmailAddress?.Address ?? "<unknown>",
-                Subject: m.Subject ?? "",
+                Sender: _sanitizer.SanitizeShortText(m.From?.EmailAddress?.Address ?? "<unknown>", EmailSanitizer.MaxSenderChars),
+                Subject: _sanitizer.SanitizeShortText(m.Subject, EmailSanitizer.MaxSubjectChars),
                 ReceivedAt: m.ReceivedDateTime ?? DateTimeOffset.MinValue,
                 IsRead: m.IsRead ?? false,
                 HasAttachments: m.HasAttachments ?? false,
-                BodyPreview: m.BodyPreview ?? "",
+                BodyPreview: _sanitizer.SanitizeShortText(m.BodyPreview, EmailSanitizer.MaxShortPreviewChars),
                 ListUnsubscribe: listUnsub));
         }
         return results;

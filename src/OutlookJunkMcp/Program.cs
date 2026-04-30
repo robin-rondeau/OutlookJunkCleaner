@@ -6,9 +6,17 @@ using Microsoft.Kiota.Abstractions.Authentication;
 using OutlookJunkMcp.Auth;
 using OutlookJunkMcp.Config;
 using OutlookJunkMcp.Graph;
+using OutlookJunkMcp.Sanitizer;
+using OutlookJunkMcp.Session;
 using OutlookJunkMcp.Tools;
 
 var mode = ParseMode(args);
+
+if (mode == Mode.TestSanitizer)
+{
+    return SanitizerSelfTest.Run();
+}
+
 var config = AppConfig.Load();
 
 return mode switch
@@ -27,6 +35,7 @@ static Mode ParseMode(string[] args)
         {
             case "--first-auth": return Mode.FirstAuth;
             case "--self-test": return Mode.SelfTest;
+            case "--test-sanitizer": return Mode.TestSanitizer;
             case "--help" or "-h": return Mode.Help;
         }
     }
@@ -38,9 +47,10 @@ static int PrintUsage()
     Console.Error.WriteLine("OutlookJunkMcp — MCP server for Outlook consumer Junk/Triage operations");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Usage:");
-    Console.Error.WriteLine("  OutlookJunkMcp.exe              run as MCP server over stdio (default)");
-    Console.Error.WriteLine("  OutlookJunkMcp.exe --first-auth interactive device-code sign-in to warm token cache");
-    Console.Error.WriteLine("  OutlookJunkMcp.exe --self-test  print Junk/Triage counts and exit");
+    Console.Error.WriteLine("  OutlookJunkMcp.exe                  run as MCP server over stdio (default)");
+    Console.Error.WriteLine("  OutlookJunkMcp.exe --first-auth     interactive device-code sign-in to warm token cache");
+    Console.Error.WriteLine("  OutlookJunkMcp.exe --self-test      print Junk/Triage counts and exit");
+    Console.Error.WriteLine("  OutlookJunkMcp.exe --test-sanitizer run EmailSanitizer in-process self-test (no auth)");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Required env vars:");
     Console.Error.WriteLine("  OUTLOOK_JUNK_MCP_CLIENT_ID      Azure app registration (public client) ID");
@@ -84,7 +94,7 @@ static async Task<int> RunSelfTestAsync(AppConfig config)
     }));
     var log = loggerFactory.CreateLogger("self-test");
 
-    var (mail, _) = await BuildMailClientAsync(config, loggerFactory);
+    var (mail, _) = await BuildMailClientAsync(config, new EmailSanitizer(), new SurfacedIds(), loggerFactory);
     var status = await mail.GetStatusAsync(config.AllowDelete, CancellationToken.None);
 
     Console.WriteLine($"Junk: {status.JunkCount} ({status.JunkUnreadCount} unread)");
@@ -105,8 +115,13 @@ static async Task<int> RunServerAsync(AppConfig config, string[] args)
 
     builder.Services.AddSingleton(config);
 
+    var sanitizer = new EmailSanitizer();
+    var surfaced = new SurfacedIds();
+    builder.Services.AddSingleton(sanitizer);
+    builder.Services.AddSingleton(surfaced);
+
     // Build MailClient eagerly so a missing token fails the server start, not the first tool call.
-    var (mail, folders) = await BuildMailClientAsync(config, LoggerFactory.Create(b =>
+    var (mail, folders) = await BuildMailClientAsync(config, sanitizer, surfaced, LoggerFactory.Create(b =>
     {
         b.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
     }));
@@ -127,7 +142,11 @@ static async Task<int> RunServerAsync(AppConfig config, string[] args)
     return 0;
 }
 
-static async Task<(MailClient Mail, FolderResolver Folders)> BuildMailClientAsync(AppConfig config, ILoggerFactory loggerFactory)
+static async Task<(MailClient Mail, FolderResolver Folders)> BuildMailClientAsync(
+    AppConfig config,
+    EmailSanitizer sanitizer,
+    SurfacedIds surfaced,
+    ILoggerFactory loggerFactory)
 {
     var auth = await MsalAuth.CreateAsync(config.ClientId, loggerFactory.CreateLogger<MsalAuth>());
 
@@ -137,7 +156,7 @@ static async Task<(MailClient Mail, FolderResolver Folders)> BuildMailClientAsyn
     var folders = new FolderResolver(graph, config.TriageFolderName, loggerFactory.CreateLogger<FolderResolver>());
     await folders.ResolveAsync();
 
-    var mail = new MailClient(graph, folders, loggerFactory.CreateLogger<MailClient>());
+    var mail = new MailClient(graph, folders, sanitizer, surfaced, loggerFactory.CreateLogger<MailClient>());
     return (mail, folders);
 }
 
@@ -161,4 +180,4 @@ internal sealed class BearerTokenAuthProvider : IAuthenticationProvider
     }
 }
 
-internal enum Mode { Server, FirstAuth, SelfTest, Help }
+internal enum Mode { Server, FirstAuth, SelfTest, TestSanitizer, Help }

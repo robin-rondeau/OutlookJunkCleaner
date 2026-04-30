@@ -1,3 +1,5 @@
+using OutlookJunkMcp.Sanitizer;
+
 namespace OutlookJunkMcp.Graph;
 
 public sealed record JunkMessageInfo(
@@ -20,6 +22,9 @@ public sealed record MessageDetails(
     bool IsRead,
     bool HasAttachments,
     string Body,
+    bool BodyTruncated,
+    IReadOnlyList<ImageInfo> Images,
+    IReadOnlyList<LinkInfo> Links,
     string? ListUnsubscribe,
     IReadOnlyList<HeaderEntry> RelevantHeaders);
 

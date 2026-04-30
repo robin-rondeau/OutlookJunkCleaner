@@ -1,18 +1,21 @@
 using Microsoft.Extensions.Logging;
 using OutlookJunkAgent;
 using OutlookJunkAgent.Drivers;
+using OutlookJunkAgent.Sanitizer;
 using OutlookJunkCommon;
 
 var dryRun = args.Contains("--dry-run");
 var help = args.Contains("--help") || args.Contains("-h");
+var maxMessages = ParseIntArg(args, "--max-messages", 50);
 
 if (help)
 {
-    Console.Error.WriteLine("OutlookJunkAgent — cron-driven LLM host for the Outlook Junk Cleaner");
+    Console.Error.WriteLine("OutlookJunkAgent — cron-driven host for the Outlook Junk Cleaner classifier");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Usage:");
-    Console.Error.WriteLine("  OutlookJunkAgent.exe              run one triage pass against the configured LLM");
-    Console.Error.WriteLine("  OutlookJunkAgent.exe --dry-run    do not invoke any mutating tool; report intent only");
+    Console.Error.WriteLine("  OutlookJunkAgent.exe                          run one triage pass");
+    Console.Error.WriteLine("  OutlookJunkAgent.exe --dry-run                classify but do not mutate the mailbox");
+    Console.Error.WriteLine("  OutlookJunkAgent.exe --max-messages N         cap messages processed this run (default 50)");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Required env vars:");
     Console.Error.WriteLine($"  {EnvVars.AnthropicApiKey}        Anthropic API key (when using anthropic provider)");
@@ -44,46 +47,94 @@ using var loggerFactory = LoggerFactory.Create(b =>
 var log = loggerFactory.CreateLogger("agent");
 
 var driver = DriverFactory.Create(loggerFactory, out var providerName, out var modelName);
-var summary = new RunSummary { Provider = providerName, Model = modelName, DryRun = dryRun };
+var spotlighter = new Spotlighter();
+var summary = new RunSummary
+{
+    Provider = providerName,
+    Model = modelName,
+    DryRun = dryRun,
+    RunToken = spotlighter.RunToken,
+};
 
 try
 {
     using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
     await using var mcp = await McpClientHost.ConnectAsync(serverPath, loggerFactory.CreateLogger<McpClientHost>(), cts.Token);
 
-    var allTools = await mcp.DiscoverToolsAsync(cts.Token);
-    var deleteEnabled = allTools.Any(t => t.Name == ToolNames.DeleteFromJunk);
-
-    // In dry-run, physically remove mutating tools from the LLM's tool list. Defense in depth —
-    // the system prompt also instructs the model not to call them, but removing them means it
-    // physically cannot.
-    var mutatingNames = new HashSet<string>(StringComparer.Ordinal)
-    {
-        ToolNames.MarkAsRead, ToolNames.MoveToTriage, ToolNames.DeleteFromJunk,
-    };
-    var tools = dryRun
-        ? allTools.Where(t => !mutatingNames.Contains(t.Name)).ToArray()
-        : allTools.ToArray();
+    var toolNames = await mcp.DiscoverToolNamesAsync(cts.Token);
+    var deleteEnabled = toolNames.Contains(ToolNames.DeleteFromJunk);
 
     var systemPrompt = await RubricLoader.BuildSystemPromptAsync(
-        rubricPath,
-        deleteEnabled,
-        dryRun,
-        tools.Select(t => t.Name).ToArray(),
-        cts.Token);
+        rubricPath, deleteEnabled, dryRun, spotlighter.RunToken, cts.Token);
 
-    log.LogInformation("Starting agent loop (provider={P} model={M} dryRun={D} deleteEnabled={DE} tools={N})",
-        providerName, modelName, dryRun, deleteEnabled, tools.Count);
+    var status = await mcp.GetStatusAsync(cts.Token);
+    log.LogInformation(
+        "Server status: junk={J} unread={U} triage={T} deleteEnabled={DE}",
+        status.JunkCount, status.JunkUnreadCount, status.TriageCount, status.DeleteEnabled);
 
-    var driverResult = await driver.RunAsync(new AgentDriverRequest(
-        SystemPrompt: systemPrompt,
-        UserPrompt: "Begin triage now. Follow the operating procedure exactly.",
-        Tools: tools,
-        ExecuteTool: (name, input, ct) => mcp.ExecuteToolAsync(name, input, summary, ct)
-    ), cts.Token);
+    var working = await mcp.ListJunkAsync(limit: maxMessages, sinceHours: null, includeRead: false, cts.Token);
+    log.LogInformation(
+        "Starting per-message classifier (provider={P} model={M} runToken={Rt} dryRun={D} working={N} cap={C})",
+        providerName, modelName, spotlighter.RunToken, dryRun, working.Count, maxMessages);
 
-    summary.RecordFinal(driverResult.FinalText);
-    for (var i = 0; i < driverResult.LlmTurns; i++) summary.RecordLlmTurn();
+    var processed = 0;
+    foreach (var msg in working)
+    {
+        cts.Token.ThrowIfCancellationRequested();
+        if (processed >= maxMessages) break;
+        processed++;
+
+        try
+        {
+            var details = await mcp.GetMessageAsync(msg.Id, cts.Token);
+            var spotlighted = spotlighter.Wrap(details);
+            var decision = await driver.ClassifyAsync(
+                new ClassificationRequest(systemPrompt, spotlighted), cts.Token);
+            summary.RecordLlmTurn();
+
+            var cleanedReason = ReasonHygiene.Clean(decision.Reason);
+            log.LogInformation(
+                "[{Id}] {Action} conf={C:F2} — {Reason}",
+                msg.Id, decision.Action, decision.Confidence, cleanedReason);
+
+            var auditReason = $"agent-asserted: {cleanedReason}";
+            var targetTool = ActionToTool(decision.Action, deleteEnabled);
+
+            if (dryRun)
+            {
+                summary.RecordToolCall($"would:{targetTool}", auditReason);
+                continue;
+            }
+
+            switch (decision.Action)
+            {
+                case ClassificationAction.ConfidentJunk when deleteEnabled:
+                    await mcp.DeleteFromJunkAsync(msg.Id, cleanedReason, cts.Token);
+                    summary.RecordToolCall(ToolNames.DeleteFromJunk, auditReason);
+                    break;
+                case ClassificationAction.ConfidentJunk:
+                    await mcp.MarkAsReadAsync(msg.Id, cleanedReason, cts.Token);
+                    summary.RecordToolCall(ToolNames.MarkAsRead, auditReason);
+                    break;
+                case ClassificationAction.Ambiguous:
+                case ClassificationAction.NotJunk:
+                    await mcp.MoveToTriageAsync(msg.Id, cleanedReason, cts.Token);
+                    summary.RecordToolCall(ToolNames.MoveToTriage, auditReason);
+                    break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Classification failed for {Id}", msg.Id);
+            summary.RecordToolCall("error", $"id={msg.Id} {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    summary.RecordFinal($"processed {processed} of {working.Count} messages");
 }
 catch (Exception ex)
 {
@@ -98,3 +149,20 @@ finally
 }
 
 return summary.Error is null ? 0 : 1;
+
+static string ActionToTool(ClassificationAction action, bool deleteEnabled) => action switch
+{
+    ClassificationAction.ConfidentJunk => deleteEnabled ? ToolNames.DeleteFromJunk : ToolNames.MarkAsRead,
+    ClassificationAction.Ambiguous => ToolNames.MoveToTriage,
+    ClassificationAction.NotJunk => ToolNames.MoveToTriage,
+    _ => "?",
+};
+
+static int ParseIntArg(string[] args, string flag, int defaultValue)
+{
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i] == flag && int.TryParse(args[i + 1], out var v) && v > 0) return v;
+    }
+    return defaultValue;
+}
