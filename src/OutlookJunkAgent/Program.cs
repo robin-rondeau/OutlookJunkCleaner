@@ -17,12 +17,14 @@ if (help)
     Console.Error.WriteLine("  OutlookJunkAgent.exe --dry-run                classify but do not mutate the mailbox");
     Console.Error.WriteLine("  OutlookJunkAgent.exe --max-messages N         cap messages processed this run (default 50)");
     Console.Error.WriteLine();
-    Console.Error.WriteLine("Required env vars:");
-    Console.Error.WriteLine($"  {EnvVars.AnthropicApiKey}        Anthropic API key (when using anthropic provider)");
+    Console.Error.WriteLine("Required env vars (depending on provider):");
+    Console.Error.WriteLine($"  {EnvVars.AnthropicApiKey}        Anthropic API key (anthropic provider)");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Optional env vars:");
-    Console.Error.WriteLine($"  {EnvVars.AgentProvider}        provider name; default 'anthropic'");
-    Console.Error.WriteLine($"  {EnvVars.AnthropicModel}        model id; default '{DriverFactory.DefaultAnthropicModel}'");
+    Console.Error.WriteLine($"  {EnvVars.AgentProvider}        provider name: 'anthropic' (default) | 'ollama'");
+    Console.Error.WriteLine($"  {EnvVars.AnthropicModel}        Anthropic model id; default '{DriverFactory.DefaultAnthropicModel}'");
+    Console.Error.WriteLine($"  {EnvVars.OllamaBaseUrl}    Ollama base URL; default '{DriverFactory.DefaultOllamaBaseUrl}'");
+    Console.Error.WriteLine($"  {EnvVars.OllamaModel}        Ollama model name; default '{DriverFactory.DefaultOllamaModel}'");
     Console.Error.WriteLine($"  {EnvVars.McpServerPath}        path to OutlookJunkMcp.exe; default 'bin/OutlookJunkMcp.exe' relative to cwd");
     return 0;
 }

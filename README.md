@@ -132,8 +132,13 @@ On the always-on Windows machine:
    [Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','sk-ant-...','User')
    # Optional:
    [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_MCP_TRIAGE_FOLDER','Triage','User')
+   # Default model is claude-haiku-4-5-20251001 (cheapest tier; plenty smart for this task).
+   # Override for higher quality at higher cost:
    [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_AGENT_MODEL','claude-opus-4-7','User')
    ```
+
+   To run a local model instead of calling the Anthropic API, see the **Local LLM via Ollama**
+   section below.
 
    Open a new terminal so they take effect.
 
@@ -206,13 +211,49 @@ Then ask things like "what's in Triage and why?" or "show me the last 20 message
 marked as read" - Claude Code uses the same MCP server and the same folder boundary as the
 cron host. This is purely for ad-hoc review; the cron does not depend on Claude Code.
 
-## Swapping LLM providers
+## Local LLM via Ollama
 
-To run against a different provider:
+If you'd rather run a local model than pay per-message API cost (or you don't want an
+Anthropic account at all), the project ships a second `IAgentDriver` for Ollama:
+
+1. Install Ollama on the always-on Windows machine: <https://ollama.com/download>.
+2. Pull a model — `llama3.1:8b` is a sensible default for this workload, or try
+   `qwen2.5:7b-instruct` / `mistral:7b-instruct` if you want to compare. ~5 GB disk per model.
+
+   ```powershell
+   ollama serve         # in one terminal, leave running
+   ollama pull llama3.1:8b
+   ```
+3. Set env vars:
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_AGENT_PROVIDER','ollama','User')
+   # Optional overrides:
+   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_OLLAMA_MODEL','llama3.1:8b','User')
+   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_OLLAMA_BASE_URL','http://localhost:11434','User')
+   ```
+
+4. Run the agent — the same `OutlookJunkAgent.exe` now drives the local model. The MCP
+   server, rubric, cron schedule, sanitization, id scoping, and Phase A/B state are
+   unchanged.
+
+The Ollama driver uses Ollama's structured-output mode (`format: <json schema>`, available
+in Ollama 0.5+) to enforce the same `{action, confidence, reason}` contract as the Anthropic
+driver. Smaller models (8B-class) are more easily fooled by injection attempts hidden in the
+body — but the MCP server's defenses (id scoping, sanitization, server-side reason
+validation) still apply, so the blast radius of an injection success is unchanged.
+
+Cost: $0 marginal beyond the electricity to run the always-on Windows machine you already have.
+
+## Swapping to another LLM provider
+
+To run against an unsupported provider (OpenAI, Azure OpenAI, Bedrock, vLLM, …):
 
 1. Add a new file under `src/OutlookJunkAgent/Drivers/`, e.g. `OpenAiAgentDriver.cs`,
-   implementing `IAgentDriver`. Translate the MCP tool schemas to the provider's
-   tool-call format (it's mostly cosmetic - both are JSON Schema variants).
+   implementing `IAgentDriver`. The interface is one method (`ClassifyAsync`); model the
+   driver after `AnthropicAgentDriver` or `OllamaAgentDriver`. Translate the inline
+   `classify` JSON Schema to the provider's structured-output mechanism (forced tool use,
+   `response_format: {type:"json_schema"}`, etc. — they're all JSON Schema variants).
 2. Add a case in `DriverFactory.Create` that returns the new driver when
    `OUTLOOK_JUNK_AGENT_PROVIDER` matches.
 3. Set the env var (`OUTLOOK_JUNK_AGENT_PROVIDER=openai`) plus whatever credentials the
@@ -237,8 +278,16 @@ To run against a different provider:
   but the Task Scheduler action inherits a snapshot at registration time. Re-run
   `install-task.ps1 -Force` after setting the env var.
 - **Anthropic 4xx errors** -> check `ANTHROPIC_API_KEY` and the model id. The default
-  (`claude-opus-4-7`) is the latest as of 2026; override via `OUTLOOK_JUNK_AGENT_MODEL`
-  if you want to use Sonnet for cheaper runs.
+  (`claude-haiku-4-5-20251001`) is the cheap-tier 2026 Haiku; override via `OUTLOOK_JUNK_AGENT_MODEL`
+  to use Sonnet 4.6 (`claude-sonnet-4-6`) or Opus 4.7 (`claude-opus-4-7`) if you want higher
+  classification quality.
+- **Anthropic 429 / 529** -> the driver retries automatically (up to 5 attempts, exponential
+  backoff with jitter, respects `Retry-After`). If you see persistent failures in the log,
+  you've likely hit a daily / monthly quota — flip to a smaller model or wait for the window
+  to reset. Each warning logs the Anthropic `request-id` for support tickets.
+- **Ollama "connection refused"** -> the local Ollama server isn't running. Start it
+  (`ollama serve`) and pre-pull the model (`ollama pull llama3.1:8b` or whatever
+  `OUTLOOK_JUNK_OLLAMA_MODEL` is set to).
 
 ## Implementation status
 

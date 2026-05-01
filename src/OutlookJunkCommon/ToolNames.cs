@@ -28,4 +28,7 @@ public static class EnvVars
     public const string AnthropicApiKey = "ANTHROPIC_API_KEY";
     public const string AnthropicModel = "OUTLOOK_JUNK_AGENT_MODEL";
     public const string McpServerPath = "OUTLOOK_JUNK_AGENT_MCP_SERVER";
+
+    public const string OllamaBaseUrl = "OUTLOOK_JUNK_OLLAMA_BASE_URL";
+    public const string OllamaModel = "OUTLOOK_JUNK_OLLAMA_MODEL";
 }

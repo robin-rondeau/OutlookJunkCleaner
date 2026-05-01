@@ -69,8 +69,10 @@ Token cache (machine-local, not in the project dir):
 - .NET 9 console app, also self-contained `win-x64`.
 - References the **MCP client** half of the C# MCP SDK to talk to the server child process. Exposes typed wrappers (`ListJunkAsync`, `GetMessageAsync`, `MarkAsReadAsync`, `MoveToTriageAsync`, `DeleteFromJunkAsync`, `GetStatusAsync`) so the host loop never deals in free-form tool dispatch.
 - Has a small `IAgentDriver` abstraction with one method: `ClassifyAsync(ClassificationRequest) → ClassificationResult`. The driver receives a stable system prompt + a per-message spotlighted payload, and returns one of `{ConfidentJunk, Ambiguous, NotJunk}` with a confidence and a short reason. The driver does NOT see the MCP tool surface; the host alone decides which tool to invoke based on the action.
-- Initial implementation: `AnthropicAgentDriver` using the Anthropic Messages API via raw `HttpClient`. Forces tool-use of a single inline `classify` schema (`tool_choice: {"type":"tool","name":"classify"}`); the model physically cannot emit anything else. ~170 LOC, no iteration loop, no schema translation.
-- To swap LLMs later, write a second driver (`OpenAiAgentDriver`, `AzureOpenAiAgentDriver`, …) and choose by env var `OUTLOOK_JUNK_AGENT_PROVIDER=anthropic|openai|azureopenai`. The MCP server, rubric, cron, security model, and host loop stay unchanged. OpenAI's equivalent of forced-tool is `response_format: {"type":"json_schema"}`; same constraint, different payload shape.
+- Two shipped drivers:
+  - `AnthropicAgentDriver` — Anthropic Messages API via raw `HttpClient`. Forces tool-use of a single inline `classify` schema (`tool_choice: {"type":"tool","name":"classify"}`); the model physically cannot emit anything else. Includes retry/backoff for 429/529/5xx with `Retry-After` honouring, request-id logging, and Debug-level usage logging (incl. cache_read tokens for verifying prompt-cache effectiveness). Default model: `claude-haiku-4-5-20251001` (cheap-tier 2026 Haiku, single-digit dollars/month at typical volume with prompt caching).
+  - `OllamaAgentDriver` — local Ollama HTTP API at `localhost:11434`. Uses Ollama's structured-output mode (`format: <json schema>`) to enforce the same `{action, confidence, reason}` contract. $0 marginal cost. Default model: `llama3.1:8b`. Smaller models are easier to fool with injection at the prompt level, but the MCP-side defenses still apply.
+- To swap to another provider (OpenAI, Bedrock, Azure, …), write a third driver and choose by env var `OUTLOOK_JUNK_AGENT_PROVIDER=anthropic|ollama|<new>`. The MCP server, rubric, cron, security model, and host loop stay unchanged. OpenAI's equivalent of forced-tool is `response_format: {"type":"json_schema"}`; same constraint, different payload shape.
 
 ### 3. `rubric.md` — the classification rubric (the "training" surface)
 
@@ -199,7 +201,7 @@ End-to-end checks before considering this "working":
 ## Open items (defaults baked in; tell me if you'd rather change)
 
 - **Triage folder name** — default `Triage` (top-level). The server creates it on first run if missing. Configurable via `OUTLOOK_JUNK_MCP_TRIAGE_FOLDER`.
-- **Initial LLM provider** — Anthropic Claude (`claude-opus-4-7` or `claude-sonnet-4-6` depending on cost/quality preference). Configurable via `OUTLOOK_JUNK_AGENT_PROVIDER` + provider-specific API key.
+- **Default LLM provider/model** — Anthropic Claude Haiku 4.5 (`claude-haiku-4-5-20251001`). Bump to Sonnet 4.6 or Opus 4.7 via `OUTLOOK_JUNK_AGENT_MODEL`, or switch to a local model entirely with `OUTLOOK_JUNK_AGENT_PROVIDER=ollama`.
 - **Anthropic SDK choice for the host** — raw `HttpClient` against the Messages API. ~170 LoC for the forced-tool classifier driver. Avoids taking a dependency on a community SDK whose lifecycle you don't control. Switch to a community SDK later if you want.
 - **MSAL client ID** — read from env var (no client ID committed to source).
 - **Hard-delete tool** — not in v1. Adding it later is a small change behind a third env-var; not currently planned.
