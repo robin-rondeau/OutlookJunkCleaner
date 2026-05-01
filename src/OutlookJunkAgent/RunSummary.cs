@@ -12,6 +12,7 @@ public sealed class RunSummary
     private readonly List<string> _events = new();
     private int _toolCalls;
     private int _llmTurns;
+    private int _heuristicTurns;
 
     public string Provider { get; init; } = "anthropic";
     public string Model { get; init; } = "claude-opus-4-7";
@@ -31,6 +32,8 @@ public sealed class RunSummary
 
     public void RecordLlmTurn() => _llmTurns++;
 
+    public void RecordHeuristicTurn() => _heuristicTurns++;
+
     public void RecordFinal(string text) => FinalText = text;
 
     public void RecordError(Exception ex) => Error = $"{ex.GetType().Name}: {ex.Message}";
@@ -42,7 +45,7 @@ public sealed class RunSummary
         var sb = new StringBuilder();
         sb.AppendLine($"=== run @ {_startedAt:yyyy-MM-dd HH:mm:ss zzz} ===");
         sb.AppendLine($"provider={Provider} model={Model} dryRun={DryRun} runToken={RunToken}");
-        sb.AppendLine($"llmTurns={_llmTurns} toolCalls={_toolCalls} duration={(DateTimeOffset.Now - _startedAt).TotalSeconds:F1}s");
+        sb.AppendLine($"llmTurns={_llmTurns} heuristicTurns={_heuristicTurns} toolCalls={_toolCalls} duration={(DateTimeOffset.Now - _startedAt).TotalSeconds:F1}s");
         if (_events.Count > 0)
         {
             sb.AppendLine("actions:");

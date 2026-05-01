@@ -71,6 +71,7 @@ try
     var deleteEnabled = toolNames.Contains(ToolNames.DeleteFromJunk);
 
     var senders = await SendersStore.LoadAsync(sendersPath, log, cts.Token);
+    var heuristics = new HeuristicClassifier(senders);
     var systemPrompt = await RubricLoader.BuildSystemPromptAsync(
         rubricPath, senders, deleteEnabled, dryRun, spotlighter.RunToken, cts.Token);
 
@@ -127,15 +128,32 @@ try
         try
         {
             var details = await mcp.GetMessageAsync(msg.Id, cts.Token);
-            var spotlighted = spotlighter.Wrap(details);
-            var decision = await driver.ClassifyAsync(
-                new ClassificationRequest(systemPrompt, spotlighted), cts.Token);
-            summary.RecordLlmTurn();
+
+            ClassificationResult decision;
+            string classifierKind;
+            string classifierLabel;
+            var heuristic = heuristics.Classify(details);
+            if (heuristic is not null)
+            {
+                decision = new ClassificationResult(heuristic.Action, 1.0, heuristic.Reason, RawText: null);
+                classifierKind = "heuristic";
+                classifierLabel = heuristic.HeuristicId;
+                summary.RecordHeuristicTurn();
+            }
+            else
+            {
+                var spotlighted = spotlighter.Wrap(details);
+                decision = await driver.ClassifyAsync(
+                    new ClassificationRequest(systemPrompt, spotlighted), cts.Token);
+                classifierKind = "llm";
+                classifierLabel = $"llm conf={decision.Confidence:F2}";
+                summary.RecordLlmTurn();
+            }
 
             var cleanedReason = ReasonHygiene.Clean(decision.Reason);
             log.LogInformation(
-                "[{Id}] {Action} conf={C:F2} — {Reason}",
-                msg.Id, decision.Action, decision.Confidence, cleanedReason);
+                "[{Id}] {Action} ({Label}) — {Reason}",
+                msg.Id, decision.Action, classifierLabel, cleanedReason);
 
             var auditReason = $"agent-asserted: {cleanedReason}";
             var targetTool = ActionToTool(decision.Action, deleteEnabled);
@@ -174,7 +192,8 @@ try
                 RunToken: spotlighter.RunToken,
                 Phase: phaseLabel,
                 Provider: providerName,
-                Model: modelName), cts.Token);
+                Model: modelName,
+                ClassifierKind: classifierKind), cts.Token);
         }
         catch (OperationCanceledException)
         {

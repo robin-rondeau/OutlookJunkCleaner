@@ -101,4 +101,5 @@ public sealed record HistoryEntry(
     string RunToken,
     string Phase,
     string Provider,
-    string Model);
+    string Model,
+    string ClassifierKind = "llm");
