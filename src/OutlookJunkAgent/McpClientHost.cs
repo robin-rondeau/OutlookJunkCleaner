@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
 using OutlookJunkCommon;
 
 namespace OutlookJunkAgent;
@@ -20,10 +21,10 @@ public sealed class McpClientHost : IAsyncDisposable
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    private readonly IMcpClient _client;
+    private readonly McpClient _client;
     private readonly ILogger<McpClientHost> _log;
 
-    private McpClientHost(IMcpClient client, ILogger<McpClientHost> log)
+    private McpClientHost(McpClient client, ILogger<McpClientHost> log)
     {
         _client = client;
         _log = log;
@@ -45,7 +46,7 @@ public sealed class McpClientHost : IAsyncDisposable
             Arguments = [],
         });
 
-        var client = await McpClientFactory.CreateAsync(transport, cancellationToken: ct).ConfigureAwait(false);
+        var client = await McpClient.CreateAsync(transport, cancellationToken: ct).ConfigureAwait(false);
         return new McpClientHost(client, log);
     }
 
@@ -156,14 +157,14 @@ public sealed class McpClientHost : IAsyncDisposable
         return text;
     }
 
-    private static string JoinText(IReadOnlyList<Content>? content)
+    private static string JoinText(IList<ContentBlock>? content)
     {
         if (content is null || content.Count == 0) return "";
-        if (content.Count == 1) return content[0].Text ?? "";
+        if (content.Count == 1) return content[0] is TextContentBlock t0 ? t0.Text ?? "" : "";
         var sb = new StringBuilder();
         foreach (var c in content)
         {
-            if (!string.IsNullOrEmpty(c.Text)) sb.AppendLine(c.Text);
+            if (c is TextContentBlock t && !string.IsNullOrEmpty(t.Text)) sb.AppendLine(t.Text);
         }
         return sb.ToString().TrimEnd();
     }
