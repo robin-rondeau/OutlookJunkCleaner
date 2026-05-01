@@ -85,4 +85,14 @@ public sealed class JunkTools
         var status = await _mail.GetStatusAsync(_config.AllowDelete, ct).ConfigureAwait(false);
         return JsonSerializer.Serialize(status, JsonOpts);
     }
+
+    [McpServerTool(Name = "lookup_classification_status")]
+    [Description("Look up the current folder bucket for each supplied message ID. Returns one entry per ID with location set to 'junk', 'triage', 'deleted', 'inbox', 'archive', 'other', or 'not_found'. Read-only; intended for the host to compute Phase A classifier accuracy by following up on past classifications. Does not require IDs to be surfaced in the current session.")]
+    public async Task<string> LookupClassificationStatus(
+        [Description("Message IDs to look up. Maximum 500 per call.")] string[] ids,
+        CancellationToken ct = default)
+    {
+        var results = await _mail.LookupClassificationStatusAsync(ids ?? Array.Empty<string>(), ct).ConfigureAwait(false);
+        return JsonSerializer.Serialize(results, JsonOpts);
+    }
 }

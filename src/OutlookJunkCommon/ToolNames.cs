@@ -9,6 +9,7 @@ public static class ToolNames
     public const string ListTriage = "list_triage";
     public const string GetStatus = "get_status";
     public const string DeleteFromJunk = "delete_from_junk";
+    public const string LookupClassificationStatus = "lookup_classification_status";
 }
 
 public static class FolderNames

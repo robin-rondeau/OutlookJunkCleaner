@@ -1,0 +1,13 @@
+{
+  "_comment": "Structured sender lists. Edit freely; entries are validated at startup and malformed ones are skipped with a warning. Domains are matched case-insensitively against the From header's domain. The narrative classification guidance lives in rubric.md.",
+  "trusted": [
+    { "domain": "opayq.com",             "note": "masked email forwarding service" },
+    { "domain": "maskedmails.com",       "note": "masked email forwarding service" },
+    { "domain": "disengage.info",        "note": "masked email forwarding service" },
+    { "domain": "blurmail.net",          "note": "masked email forwarding service" },
+    { "domain": "moremobileprivacy.org", "note": "masked email forwarding service" },
+    { "domain": "kijiji.ca",             "note": "" },
+    { "domain": "linkedin.com",          "note": "" }
+  ],
+  "junk": []
+}

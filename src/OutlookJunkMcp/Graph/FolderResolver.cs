@@ -25,6 +25,8 @@ public sealed class FolderResolver
     public string JunkFolderId { get; private set; } = "";
     public string TriageFolderId { get; private set; } = "";
     public string DeletedItemsFolderId { get; private set; } = "";
+    public string InboxFolderId { get; private set; } = "";
+    public string ArchiveFolderId { get; private set; } = "";
 
     public async Task ResolveAsync(CancellationToken ct = default)
     {
@@ -36,11 +38,30 @@ public sealed class FolderResolver
             ?? throw new InvalidOperationException("Could not resolve well-known DeletedItems folder.");
         DeletedItemsFolderId = deleted.Id ?? throw new InvalidOperationException("DeletedItems folder has no ID.");
 
+        var inbox = await _graph.Me.MailFolders["inbox"].GetAsync(cancellationToken: ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Could not resolve well-known Inbox folder.");
+        InboxFolderId = inbox.Id ?? throw new InvalidOperationException("Inbox folder has no ID.");
+
+        // Archive may not exist on a fresh Outlook.com account that has never archived a message.
+        // Treat that as "no archive folder" rather than failing the server start; lookups will
+        // simply never bucket anything as 'archive' until the folder appears.
+        try
+        {
+            var archive = await _graph.Me.MailFolders["archive"].GetAsync(cancellationToken: ct).ConfigureAwait(false);
+            ArchiveFolderId = archive?.Id ?? "";
+        }
+        catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+        {
+            _log.LogInformation("Archive folder not present on this account; classification lookups will report 'other' for archived items.");
+            ArchiveFolderId = "";
+        }
+
         TriageFolderId = await ResolveOrCreateTriageAsync(ct).ConfigureAwait(false);
 
         _log.LogInformation(
-            "Folder allow-list resolved: Junk={JunkId} Triage='{TriageName}'={TriageId} DeletedItems={DeletedId}",
-            JunkFolderId, _triageFolderName, TriageFolderId, DeletedItemsFolderId);
+            "Folder allow-list resolved: Junk={JunkId} Triage='{TriageName}'={TriageId} DeletedItems={DeletedId} Inbox={InboxId} Archive={ArchiveId}",
+            JunkFolderId, _triageFolderName, TriageFolderId, DeletedItemsFolderId, InboxFolderId,
+            string.IsNullOrEmpty(ArchiveFolderId) ? "(none)" : ArchiveFolderId);
     }
 
     private async Task<string> ResolveOrCreateTriageAsync(CancellationToken ct)
@@ -72,4 +93,21 @@ public sealed class FolderResolver
         folderId == JunkFolderId || folderId == TriageFolderId;
 
     public bool IsJunk(string folderId) => folderId == JunkFolderId;
+
+    /// <summary>
+    /// Returns a coarse-grained location bucket for a parent folder ID, used by the classification
+    /// status lookup tool to feed Phase A accuracy metrics. Buckets are intentionally fewer than
+    /// real folders so the host (and its log output) doesn't have to know about every Outlook
+    /// folder layout the user might create.
+    /// </summary>
+    public string GetBucket(string? parentFolderId)
+    {
+        if (string.IsNullOrEmpty(parentFolderId)) return "not_found";
+        if (parentFolderId == JunkFolderId) return "junk";
+        if (parentFolderId == TriageFolderId) return "triage";
+        if (parentFolderId == DeletedItemsFolderId) return "deleted";
+        if (parentFolderId == InboxFolderId) return "inbox";
+        if (!string.IsNullOrEmpty(ArchiveFolderId) && parentFolderId == ArchiveFolderId) return "archive";
+        return "other";
+    }
 }

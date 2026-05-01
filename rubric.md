@@ -3,7 +3,8 @@
 You — the classifier — see one Junk-folder message at a time and emit one decision via the
 `classify` tool. The host translates your decision into the appropriate mailbox action; you do
 not call mutation tools yourself. **Edit this file as you observe what the classifier gets
-wrong.** It is the only "training" surface; everything else is structural.
+wrong.** It is the natural-language "training" surface; structured sender allow/deny lists live
+in `senders.json` and are presented to you separately above this rubric.
 
 For each message, return exactly one of:
 
@@ -22,10 +23,9 @@ email. <= 200 chars, plain ASCII, one line. Examples: "lottery-style subject; un
 
 ## Definite-junk patterns
 
-Mail matching any of these is `confident_junk`.
+Mail matching any of these is `confident_junk`. (Sender-domain matches against the known-junk
+list above also qualify on their own; `reason` may be brief, e.g. "in known-junk list".)
 
-- **Sender domains (add as you see repeats):**
-  - _add domains here, one per line, e.g. `winners-club.example`_
 - **Subject patterns:**
   - "You've won …" / "Congratulations, you …" lottery-style subjects
   - "Final notice" / "Your account will be suspended" combined with no recognizable sender
@@ -47,16 +47,10 @@ Mail matching any of these is `confident_junk`.
 
 ## Definite-not-junk patterns
 
-Mail matching any of these is `not_junk`. The host will route it to Triage so you can rescue it.
+Mail from any sender domain in the trusted list above should not be classified as
+`confident_junk` on signal patterns alone. If anything still looks borderline, choose
+`ambiguous` and let the user decide in Triage. Beyond the trusted-domain list:
 
-- **Sender domains (add as you see false positives):**
-  - opayq.com - these are masked emails generated for personal use which auto-forward to this mailbox
-  - maskedmails.com - these are masked emails generated for personal use which auto-forward to this mailbox
-  - disengage.info - these are masked emails generated for personal use which auto-forward to this mailbox
-  - blurmail.net - these are masked emails generated for personal use which auto-forward to this mailbox
-  - moremobileprivacy.org - these are masked emails generated for personal use which auto-forward to this mailbox
-  - kijiji.ca
-  - linkedin.com
 - **Transactional patterns** the user clearly opted into:
   - Receipts / order confirmations / shipping notifications from services they use
   - Two-factor codes, password resets, account verification from real services

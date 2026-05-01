@@ -15,6 +15,9 @@ out/
 logs/
 *.log
 
+# Agent runtime state (history.jsonl)
+state/
+
 # Local config / secrets
 .env
 .env.*

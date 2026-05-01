@@ -132,6 +132,48 @@ public sealed class MailClient
         return new MutationResult(id, ToolNames.DeleteFromJunk, "moved-junk-to-deleted-items", cleanedReason);
     }
 
+    /// <summary>
+    /// Look up the current parent-folder bucket for each supplied message id. Read-only and
+    /// intentionally bypasses SurfacedIds enforcement: this tool exists so the host can compute
+    /// Phase-A accuracy by following up on past classifications, and those ids were surfaced in
+    /// previous (now-terminated) sessions whose SurfacedIds set is gone. The resulting info leak
+    /// is bounded to "what folder bucket is this message id in" — no body, sender, subject, or
+    /// other content. Mutating tools still require SurfacedIds membership.
+    /// </summary>
+    public async Task<IReadOnlyList<ClassificationLookupEntry>> LookupClassificationStatusAsync(
+        IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (ids is null || ids.Count == 0) return Array.Empty<ClassificationLookupEntry>();
+        if (ids.Count > 500)
+        {
+            throw new ArgumentException("Too many ids; maximum 500 per call.", nameof(ids));
+        }
+
+        var results = new List<ClassificationLookupEntry>(ids.Count);
+        foreach (var id in ids)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                results.Add(new ClassificationLookupEntry(id ?? "", "not_found"));
+                continue;
+            }
+            try
+            {
+                var msg = await _graph.Me.Messages[id].GetAsync(req =>
+                {
+                    req.QueryParameters.Select = ["id", "parentFolderId"];
+                }, cancellationToken: ct).ConfigureAwait(false);
+                results.Add(new ClassificationLookupEntry(id, _folders.GetBucket(msg?.ParentFolderId)));
+            }
+            catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
+            {
+                results.Add(new ClassificationLookupEntry(id, "not_found"));
+            }
+        }
+        return results;
+    }
+
     public async Task<StatusInfo> GetStatusAsync(bool deleteEnabled, CancellationToken ct)
     {
         var junkFolder = await _graph.Me.MailFolders[_folders.JunkFolderId].GetAsync(cancellationToken: ct).ConfigureAwait(false);

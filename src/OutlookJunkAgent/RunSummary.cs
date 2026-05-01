@@ -19,6 +19,7 @@ public sealed class RunSummary
     public string RunToken { get; init; } = "";
     public string? FinalText { get; private set; }
     public string? Error { get; private set; }
+    public string? AccuracyBlock { get; private set; }
 
     public void RecordToolCall(string name, string? reason)
     {
@@ -34,6 +35,8 @@ public sealed class RunSummary
 
     public void RecordError(Exception ex) => Error = $"{ex.GetType().Name}: {ex.Message}";
 
+    public void RecordAccuracy(string rendered) => AccuracyBlock = rendered;
+
     public string Render()
     {
         var sb = new StringBuilder();
@@ -44,6 +47,13 @@ public sealed class RunSummary
         {
             sb.AppendLine("actions:");
             foreach (var e in _events) sb.AppendLine(e);
+        }
+        if (AccuracyBlock is { Length: > 0 })
+        {
+            foreach (var line in AccuracyBlock.Split('\n'))
+            {
+                sb.AppendLine(line.TrimEnd('\r'));
+            }
         }
         if (FinalText is { Length: > 0 })
         {

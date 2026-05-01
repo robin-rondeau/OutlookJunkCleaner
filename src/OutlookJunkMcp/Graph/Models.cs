@@ -38,3 +38,5 @@ public sealed record StatusInfo(
     int TriageCount,
     bool DeleteEnabled,
     IReadOnlyList<string> AllowedFolders);
+
+public sealed record ClassificationLookupEntry(string Id, string Location);

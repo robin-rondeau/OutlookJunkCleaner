@@ -33,9 +33,13 @@ var workingDir = Directory.GetCurrentDirectory();
 var serverPath = Environment.GetEnvironmentVariable(EnvVars.McpServerPath)
     ?? Path.Combine(workingDir, "bin", OperatingSystem.IsWindows() ? "OutlookJunkMcp.exe" : "OutlookJunkMcp");
 var rubricPath = Path.Combine(workingDir, "rubric.md");
+var sendersPath = Path.Combine(workingDir, "senders.json");
 var logsDir = Path.Combine(workingDir, "logs");
+var stateDir = Path.Combine(workingDir, "state");
 Directory.CreateDirectory(logsDir);
+Directory.CreateDirectory(stateDir);
 var logPath = Path.Combine(logsDir, $"{DateTime.Now:yyyy-MM-dd}.log");
+var historyPath = Path.Combine(stateDir, "history.jsonl");
 
 using var loggerFactory = LoggerFactory.Create(b =>
 {
@@ -66,13 +70,47 @@ try
     var toolNames = await mcp.DiscoverToolNamesAsync(cts.Token);
     var deleteEnabled = toolNames.Contains(ToolNames.DeleteFromJunk);
 
+    var senders = await SendersStore.LoadAsync(sendersPath, log, cts.Token);
     var systemPrompt = await RubricLoader.BuildSystemPromptAsync(
-        rubricPath, deleteEnabled, dryRun, spotlighter.RunToken, cts.Token);
+        rubricPath, senders, deleteEnabled, dryRun, spotlighter.RunToken, cts.Token);
 
     var status = await mcp.GetStatusAsync(cts.Token);
     log.LogInformation(
         "Server status: junk={J} unread={U} triage={T} deleteEnabled={DE}",
         status.JunkCount, status.JunkUnreadCount, status.TriageCount, status.DeleteEnabled);
+
+    var history = new HistoryStore(historyPath, log);
+    await history.PruneOlderThanAsync(TimeSpan.FromDays(30), cts.Token);
+    var pastEntries = await history.LoadAsync(cts.Token);
+    var phaseLabel = deleteEnabled ? "B" : "A";
+
+    if (toolNames.Contains(ToolNames.LookupClassificationStatus))
+    {
+        var accuracy = await AccuracyComputer.ComputeAsync(
+            pastEntries,
+            minAge: TimeSpan.FromHours(48),
+            maxAge: TimeSpan.FromDays(30),
+            mcp,
+            log,
+            cts.Token);
+        if (accuracy.HasData)
+        {
+            var rendered = accuracy.Render();
+            foreach (var line in rendered.Split('\n'))
+            {
+                log.LogInformation("{Line}", line.TrimEnd('\r'));
+            }
+            summary.RecordAccuracy(rendered);
+        }
+        else if (accuracy.LookupFailed)
+        {
+            summary.RecordAccuracy("classification audit: lookup failed this run.");
+        }
+    }
+    else
+    {
+        log.LogInformation("MCP server does not expose lookup_classification_status; skipping accuracy audit. Rebuild OutlookJunkMcp to enable.");
+    }
 
     var working = await mcp.ListJunkAsync(limit: maxMessages, sinceHours: null, includeRead: false, cts.Token);
     log.LogInformation(
@@ -124,6 +162,19 @@ try
                     summary.RecordToolCall(ToolNames.MoveToTriage, auditReason);
                     break;
             }
+
+            // Record only after a successful mutation, so the history reflects what the user
+            // could actually have observed in their mailbox. Dry-run classifications never
+            // change folder state and would falsely register as "user agreed" in the lookup.
+            await history.AppendAsync(new HistoryEntry(
+                Timestamp: DateTimeOffset.UtcNow,
+                MessageId: msg.Id,
+                AgentDecision: ActionToHistoryString(decision.Action),
+                AgentReason: cleanedReason,
+                RunToken: spotlighter.RunToken,
+                Phase: phaseLabel,
+                Provider: providerName,
+                Model: modelName), cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -158,6 +209,14 @@ static string ActionToTool(ClassificationAction action, bool deleteEnabled) => a
     ClassificationAction.Ambiguous => ToolNames.MoveToTriage,
     ClassificationAction.NotJunk => ToolNames.MoveToTriage,
     _ => "?",
+};
+
+static string ActionToHistoryString(ClassificationAction action) => action switch
+{
+    ClassificationAction.ConfidentJunk => "confident_junk",
+    ClassificationAction.Ambiguous => "ambiguous",
+    ClassificationAction.NotJunk => "not_junk",
+    _ => "unknown",
 };
 
 static int ParseIntArg(string[] args, string flag, int defaultValue)

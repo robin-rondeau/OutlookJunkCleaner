@@ -126,6 +126,25 @@ public sealed class McpClientHost : IAsyncDisposable
             ?? throw new InvalidOperationException("get_status returned null content");
     }
 
+    public async Task<IReadOnlyDictionary<string, string>> LookupClassificationStatusAsync(
+        IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        if (ids.Count == 0) return new Dictionary<string, string>(StringComparer.Ordinal);
+        var args = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["ids"] = ids.ToArray(),
+        };
+        var json = await CallTextToolAsync(ToolNames.LookupClassificationStatus, args, ct).ConfigureAwait(false);
+        var entries = JsonSerializer.Deserialize<IReadOnlyList<ClassificationLookup>>(json, JsonOpts)
+            ?? Array.Empty<ClassificationLookup>();
+        var result = new Dictionary<string, string>(entries.Count, StringComparer.Ordinal);
+        foreach (var e in entries)
+        {
+            if (!string.IsNullOrEmpty(e.Id)) result[e.Id] = e.Location;
+        }
+        return result;
+    }
+
     private async Task<string> CallTextToolAsync(string name, IReadOnlyDictionary<string, object?> args, CancellationToken ct)
     {
         var response = await _client.CallToolAsync(name, args, cancellationToken: ct).ConfigureAwait(false);
@@ -201,3 +220,5 @@ public sealed record ServerStatus(
     int TriageCount,
     bool DeleteEnabled,
     IReadOnlyList<string> AllowedFolders);
+
+public sealed record ClassificationLookup(string Id, string Location);
