@@ -66,7 +66,10 @@ var summary = new RunSummary
 
 try
 {
-    using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+    // Must fire before the 10-minute Task Scheduler ExecutionTimeLimit (see install-task.ps1)
+    // so the run gets a chance to catch the cancellation, flush the audit log, and exit cleanly
+    // rather than being hard-killed mid-mutation.
+    using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(9));
     await using var mcp = await McpClientHost.ConnectAsync(serverPath, loggerFactory.CreateLogger<McpClientHost>(), cts.Token);
 
     var toolNames = await mcp.DiscoverToolNamesAsync(cts.Token);
