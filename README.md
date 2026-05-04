@@ -2,11 +2,11 @@
 
 A junk-mail triage agent for a single user's Outlook **consumer** account (`outlook.com`,
 `hotmail.com`, `live.com`). Runs hourly via Windows Task Scheduler, classifies unread Junk
-messages against a user-maintained rubric, and either marks confident junk as read in place
-(Phase A) or eventually deletes it (Phase B). Ambiguous mail is moved to a Triage folder
-for manual review.
+messages against user-maintained rubric and sender lists, and either marks confident junk as
+read in place (Phase A) or eventually deletes it (Phase B). Ambiguous mail is moved to a
+Triage folder under the Inbox so the user's Outlook clients badge its unread count.
 
-The architecture is designed around three properties:
+The architecture is designed around four properties:
 
 - **Folder-scoped boundary.** Microsoft Graph has no folder-level OAuth scopes, so the boundary
   is enforced in code by an MCP server that holds the credentials and only exposes a narrow
@@ -14,6 +14,10 @@ The architecture is designed around three properties:
 - **LLM-provider portability.** A small custom C# host drives the cron run against any provider
   (default: Anthropic Claude). To swap providers later, write a second `IAgentDriver` and change
   one env var. No other piece changes.
+- **Heuristic-first, LLM-second.** Trusted and known-junk sender domains in `senders.json` are
+  matched deterministically before the LLM is called, both to cut API cost and to make the
+  obvious cases auditable and reproducible. The LLM only classifies messages that don't match
+  either list.
 - **Prompt-injection hardening.** Email content is attacker-controlled. The host classifies one
   message at a time with a fresh LLM context (no cross-message contamination), feeds the LLM
   a server-side-sanitized payload (HTML stripped, unicode-formatting code points removed,
@@ -31,21 +35,26 @@ See `PLAN.md` for the design rationale.
    |  hourly, 06:00-23:00
    v
 [OutlookJunkAgent.exe]   <- the cron-driven host (LLM-swappable)
+   |--- log-retention sweep (drops logs/*.log older than 30 days)
    |--- spawns MCP server as child process (stdio)
-   |--- discovers tool list (used to detect Phase A vs Phase B)
-   |--- loads rubric.md -> builds stable cached system prompt
-   '--- per-message classifier loop:
+   |--- discovers tool list (detects Phase A vs B; detects accuracy-lookup support)
+   |--- loads rubric.md + senders.json (LocalAppData preferred; logs SHA-256 of each)
+   |--- prunes state/history.jsonl to 30 days, computes Phase-A accuracy from recent entries
+   '--- per-message classifier loop (cap --max-messages, default 50):
         for each unread Junk message:
-          mcp.get_message -> Spotlighter wraps in random delimiters
-          driver.ClassifyAsync (one-shot, fresh LLM context)
+          mcp.get_message  ->  HeuristicClassifier (trusted/junk-list match)
+                           ->  if matched: skip LLM; reason = list-match
+                           ->  else:        Spotlighter wraps in random delimiters,
+                                            driver.ClassifyAsync (one-shot, fresh LLM context)
           host dispatches mark_as_read | move_to_triage | delete_from_junk
+          host appends a HistoryEntry to state/history.jsonl
                     |
                     v
 [OutlookJunkMcp.exe]   <- the boundary (single owner of credentials)
    |--- MSAL.NET -> Microsoft Graph -> user's mailbox
    |--- sanitizes email content (HTML strip, unicode hygiene, link/image extraction)
-   |--- per-session id allow-set (refuses unknown ids)
-   '--- exposes 6 (Phase A) or 7 (Phase B) tools, folder-allow-listed
+   |--- per-session id allow-set (refuses unknown ids on mutating + get_message)
+   '--- exposes 7 (Phase A) or 8 (Phase B) tools, folder-allow-listed
 ```
 
 Tool surface (Phase A):
@@ -55,6 +64,9 @@ Tool surface (Phase A):
 - `mark_as_read(id, reason)` - confident-junk action in Phase A
 - `move_to_triage(id, reason)` - ambiguous-mail action in either phase
 - `get_status()`
+- `lookup_classification_status(ids[])` - bucket each id into junk/triage/deleted/inbox/archive/other/not_found.
+  Used by the host to compute Phase-A accuracy from past classifications. Read-only; bypasses the
+  per-session id allow-set so the host can follow up on ids surfaced in *previous* runs.
 
 Phase B adds:
 - `delete_from_junk(id, reason)` - moves to Deleted Items (recoverable ~30 days)
@@ -65,9 +77,12 @@ Phase B adds:
 OutlookJunkCleaner.sln
 src/
   OutlookJunkCommon/   shared constants (tool names, env vars)
-  OutlookJunkMcp/      MCP server: Graph + MSAL + folder allow-list
-  OutlookJunkAgent/    cron host: MCP client + IAgentDriver + Anthropic driver
-rubric.md              classification rubric - edit this as you train
+  OutlookJunkMcp/      MCP server: Graph + MSAL + folder allow-list + sanitizer
+  OutlookJunkAgent/    cron host: MCP client + IAgentDriver + heuristics + history + accuracy
+tests/
+  OutlookJunkTests/    xUnit suite for the prompt-injection security boundary
+rubric.md              narrative classification rubric - edit this as you train
+senders.json           structured trusted/junk sender lists - edit alongside rubric
 .mcp.json              lets Claude Code attach for ad-hoc interactive review
 scripts/
   first-auth.ps1
@@ -95,7 +110,12 @@ PLAN.md
 # from the repo root
 dotnet restore
 dotnet build -c Release
+dotnet test                    # runs the xUnit suite under tests/OutlookJunkTests
 ```
+
+The test suite covers the prompt-injection security boundary (EmailSanitizer, Spotlighter,
+ReasonHygiene, ReasonValidator). It runs in-process and needs no auth or Graph access — gate
+on it for any change to those components.
 
 For deployment, publish self-contained `win-x64` so the always-on machine doesn't need a
 .NET runtime install:
@@ -112,18 +132,24 @@ This produces `OutlookJunkMcp.exe` and `OutlookJunkAgent.exe` under `publish/bin
 On the always-on Windows machine:
 
 1. Pick a stable directory, e.g. `C:\Tools\OutlookJunkCleaner\`.
-2. Copy `rubric.md`, `.mcp.json`, and `scripts/` from this repo to that directory.
+2. Copy `rubric.md`, `senders.json`, `.mcp.json`, and `scripts/` from this repo to that directory.
 3. Copy the published `bin/` directory (containing both `.exe` files and dependencies) into it.
 
    ```
    C:\Tools\OutlookJunkCleaner\
      .mcp.json
      rubric.md
+     senders.json
      scripts\
      bin\
        OutlookJunkMcp.exe
        OutlookJunkAgent.exe
    ```
+
+   For tighter ACLs on the prompt-shaping inputs, optionally move `rubric.md` and
+   `senders.json` to `%LocalAppData%\OutlookJunkAgent\` instead. The agent prefers that path
+   and falls back to the working directory when absent. Either way, the SHA-256 of each file
+   is logged on every run so a silent edit is visible in `logs\YYYY-MM-DD.log`.
 
 4. Set the per-user environment variables (PowerShell):
 
@@ -156,11 +182,16 @@ On the always-on Windows machine:
    ```powershell
    .\bin\OutlookJunkMcp.exe --self-test
    # Expected: prints "Junk: N (M unread)\nTriage: K\nDeleteEnabled: False"
+   # Side-effect on first run: creates Inbox\Triage if missing.
 
    .\bin\OutlookJunkMcp.exe --test-sanitizer
    # Expected: 22 / 22 sanitizer self-tests passed
    # Runs the in-process EmailSanitizer assertion suite. No auth needed.
    ```
+
+   For the cross-component test suite (51 cases spanning EmailSanitizer, Spotlighter,
+   ReasonHygiene, and ReasonValidator), run `dotnet test` from the repo root. Same coverage,
+   integrated with `dotnet`'s tooling so it can be wired into CI.
 
 7. **Smoke-test** the agent host (dry-run - classifies but does not mutate the mailbox):
 
@@ -182,8 +213,15 @@ On the always-on Windows machine:
 
 Phase A is the default. The agent's confident-junk action is `mark_as_read` (the message stays
 in Junk, just with the read flag set). You audit by looking at Junk: read = agent-classified;
-unread = agent hasn't seen it yet. Watch for ~1 week, edit `rubric.md` whenever the agent
-makes a mistake.
+unread = agent hasn't seen it yet. Watch for ~1 week, edit `rubric.md` (narrative guidance) and
+`senders.json` (trusted/junk domain lists) whenever the agent makes a mistake.
+
+The run summary in `logs\YYYY-MM-DD.log` includes a `classification audit` block computed from
+`state\history.jsonl`: of the messages the agent called `confident_junk` 48h-30d ago, how many
+were rescued by the user to Inbox/Archive (your false-positive rate, the actual gate for Phase
+B promotion), how many were deleted, how many are still in Junk. The block also reports the
+missed-junk rate on triage decisions (messages the agent routed to Triage that you ended up
+deleting). Graduate when the rescue rate is acceptably low for *your* tolerance.
 
 When you're satisfied, graduate:
 
@@ -265,7 +303,16 @@ To run against an unsupported provider (OpenAI, Azure OpenAI, Bedrock, vLLM, …
 
 - **Token cache:** `%LOCALAPPDATA%\OutlookJunkMcp\token.cache` - DPAPI-encrypted, per-user.
 - **Per-day audit log:** `<project-dir>\logs\YYYY-MM-DD.log` - what tools the agent called,
-  with the reasons it provided.
+  with the reasons it provided. Auto-pruned on each run: anything older than 30 days is
+  deleted at startup.
+- **Classification history:** `<project-dir>\state\history.jsonl` - one line per past
+  classification, used by the next run to look up where the user moved each message and
+  compute the Phase-A accuracy block. Rolling 30-day window; older entries are pruned at
+  startup.
+- **Prompt-shaping inputs (preferred path):** `%LOCALAPPDATA%\OutlookJunkAgent\rubric.md` and
+  `%LOCALAPPDATA%\OutlookJunkAgent\senders.json`. Tighter default ACLs than the project
+  directory. The agent falls back to the project directory if these aren't present, and logs
+  the SHA-256 of whichever copy it actually read so silent edits show up in the audit trail.
 
 ## Troubleshooting
 
@@ -289,28 +336,20 @@ To run against an unsupported provider (OpenAI, Azure OpenAI, Bedrock, vLLM, …
   (`ollama serve`) and pre-pull the model (`ollama pull llama3.1:8b` or whatever
   `OUTLOOK_JUNK_OLLAMA_MODEL` is set to).
 
-## Implementation status
+## Build verification
 
-The full source has been written but the solution has **not yet been built** - the
-development environment that produced it didn't have the .NET SDK available. First
-local build is expected to surface a small number of API-shape adjustments,
-specifically in three areas:
+The solution builds clean against `ModelContextProtocol 1.0.0`, `Microsoft.Graph 5.66`,
+`Microsoft.Identity.Client 4.66.2`, and `HtmlAgilityPack 1.11.65`. From the repo root:
 
-- **`ModelContextProtocol` C# SDK** (pinned to `0.6.0`). Type names like
-  `CallToolResult` / `CallToolResponse`, `Content` / `ContentBlock`, and the exact tool-schema
-  property name on `McpClientTool` have shifted across SDK versions. If `dotnet build`
-  reports missing types in `src/OutlookJunkAgent/McpClientHost.cs`, those are the lines
-  to look at - bump the package version or rename the types. The protocol behavior is
-  stable; only the C# names are in flux.
-- **`Microsoft.Graph` v5 SDK** request-builder paths (`Me.Messages[id].Move.PostAsync(...)`,
-  `MovePostRequestBody`). These are stable from 5.40+ but the namespace import may need
-  adjustment depending on the exact patch version.
-- **`HtmlAgilityPack`** (pinned to `1.11.65`) — used by `EmailSanitizer` for HTML→text. The
-  `HtmlNode` / `HtmlTextNode` / `HtmlEntity` API has been stable for years; mostly a confidence
-  check that the package resolves.
+```bash
+dotnet build -c Release       # 0 warnings, 0 errors
+dotnet test                   # 51 tests across the prompt-injection security boundary
+```
 
-Run `dotnet build -c Release` from the repo root after install and report any errors;
-the rest of the design (folder allow-list, MSAL flow, classifier dispatch, Phase A/B gating,
-sanitizer pipeline) is provider-stable and shouldn't need rework. After build, run
-`bin\OutlookJunkMcp.exe --test-sanitizer` to verify the sanitizer transforms before
-exercising the live mailbox path.
+The xUnit suite under `tests/OutlookJunkTests/` covers `EmailSanitizer` (HTML drop tags,
+hidden-CSS subtree drop, image and link extraction, host-mismatch detection, unicode hygiene,
+length cap, ZWSP-in-domain, base64 data: URIs), `Spotlighter` (run-token shape, marker
+emission, body/subject scrubbing of foreign / actual / mixed-case markers), and both reason
+cleaners (`ReasonHygiene` ASCII-strict, `ReasonValidator` UTF-8-preserving — control-char
+strip, CRLF neutralisation, length cap, whitespace collapse). Run `dotnet test` after any
+change to those files.
