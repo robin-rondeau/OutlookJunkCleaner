@@ -52,6 +52,8 @@ using var loggerFactory = LoggerFactory.Create(b =>
 });
 var log = loggerFactory.CreateLogger("agent");
 
+LogRetention.SweepOlderThan(logsDir, TimeSpan.FromDays(30), log);
+
 var driver = DriverFactory.Create(loggerFactory, out var providerName, out var modelName);
 var spotlighter = new Spotlighter();
 var summary = new RunSummary
