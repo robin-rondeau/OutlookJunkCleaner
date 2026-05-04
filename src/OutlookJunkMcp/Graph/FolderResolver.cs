@@ -66,9 +66,15 @@ public sealed class FolderResolver
 
     private async Task<string> ResolveOrCreateTriageAsync(CancellationToken ct)
     {
-        var existing = await _graph.Me.MailFolders.GetAsync(req =>
+        // Triage lives as a child of Inbox so Outlook clients badge its unread count the same
+        // way they badge Inbox sub-folders — that's the only path that gives the user a
+        // new-mail-arriving signal when the agent moves something there. A top-level mail
+        // folder doesn't get badged on most clients.
+        var filter = $"displayName eq '{_triageFolderName.Replace("'", "''")}'";
+
+        var existing = await _graph.Me.MailFolders["inbox"].ChildFolders.GetAsync(req =>
         {
-            req.QueryParameters.Filter = $"displayName eq '{_triageFolderName.Replace("'", "''")}'";
+            req.QueryParameters.Filter = filter;
             req.QueryParameters.Top = 1;
         }, cancellationToken: ct).ConfigureAwait(false);
 
@@ -78,15 +84,58 @@ public sealed class FolderResolver
             return id;
         }
 
-        _log.LogInformation("Triage folder '{Name}' not found; creating.", _triageFolderName);
-        var created = await _graph.Me.MailFolders.PostAsync(new MailFolder
+        await WarnIfStaleTopLevelTriageAsync(filter, ct).ConfigureAwait(false);
+
+        _log.LogInformation("Triage folder '{Name}' not found under Inbox; creating.", _triageFolderName);
+        var created = await _graph.Me.MailFolders["inbox"].ChildFolders.PostAsync(new MailFolder
         {
             DisplayName = _triageFolderName,
             IsHidden = false,
         }, cancellationToken: ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Failed to create Triage folder '{_triageFolderName}'.");
+            ?? throw new InvalidOperationException($"Failed to create Triage folder '{_triageFolderName}' under Inbox.");
 
         return created.Id ?? throw new InvalidOperationException("Created Triage folder has no ID.");
+    }
+
+    /// <summary>
+    /// Detects an orphaned top-level mail folder with the same name (left over from before
+    /// Triage was moved under Inbox). Logs a one-line migration nudge if it has messages — we
+    /// will not auto-move them because that's destructive and the user might have other plans.
+    /// </summary>
+    private async Task WarnIfStaleTopLevelTriageAsync(string filter, CancellationToken ct)
+    {
+        try
+        {
+            var top = await _graph.Me.MailFolders.GetAsync(req =>
+            {
+                req.QueryParameters.Filter = filter;
+                req.QueryParameters.Top = 1;
+            }, cancellationToken: ct).ConfigureAwait(false);
+
+            var stale = top?.Value?.FirstOrDefault();
+            if (stale is null) return;
+
+            var count = stale.TotalItemCount ?? 0;
+            if (count > 0)
+            {
+                _log.LogWarning(
+                    "STALE: a top-level mail folder named '{Name}' exists with {Count} message(s). " +
+                    "It is no longer used as Triage (Triage now lives under Inbox so mail clients " +
+                    "badge the unread count). Move those message(s) into Inbox\\{Name} and delete " +
+                    "the top-level folder to silence this warning and to keep the accuracy audit accurate.",
+                    _triageFolderName, count, _triageFolderName);
+            }
+            else
+            {
+                _log.LogInformation(
+                    "An empty top-level mail folder named '{Name}' exists; harmless, but you can delete it.",
+                    _triageFolderName);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Stale top-level Triage check failed; continuing.");
+        }
     }
 
     public bool IsAllowedReadFolder(string folderId) =>
