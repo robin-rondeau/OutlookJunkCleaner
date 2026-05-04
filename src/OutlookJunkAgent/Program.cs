@@ -32,8 +32,8 @@ if (help)
 var workingDir = Directory.GetCurrentDirectory();
 var serverPath = Environment.GetEnvironmentVariable(EnvVars.McpServerPath)
     ?? Path.Combine(workingDir, "bin", OperatingSystem.IsWindows() ? "OutlookJunkMcp.exe" : "OutlookJunkMcp");
-var rubricPath = Path.Combine(workingDir, "rubric.md");
-var sendersPath = Path.Combine(workingDir, "senders.json");
+var (rubricPath, _) = ConfigPaths.ResolveRubric(workingDir);
+var (sendersPath, _) = ConfigPaths.ResolveSenders(workingDir);
 var logsDir = Path.Combine(workingDir, "logs");
 var stateDir = Path.Combine(workingDir, "state");
 Directory.CreateDirectory(logsDir);
@@ -79,6 +79,14 @@ try
     var heuristics = new HeuristicClassifier(senders);
     var systemPrompt = await RubricLoader.BuildSystemPromptAsync(
         rubricPath, senders, deleteEnabled, dryRun, spotlighter.RunToken, cts.Token);
+
+    var rubricHash = ConfigPaths.Sha256Short(rubricPath);
+    var sendersHash = ConfigPaths.Sha256Short(sendersPath);
+    log.LogInformation(
+        "config: rubric={RP} sha256={RH}; senders={SP} sha256={SH}",
+        rubricPath, rubricHash, sendersPath, sendersHash);
+    summary.RecordConfigSnapshot(
+        $"rubric:  {rubricPath}  sha256={rubricHash}\nsenders: {sendersPath}  sha256={sendersHash}");
 
     var status = await mcp.GetStatusAsync(cts.Token);
     log.LogInformation(

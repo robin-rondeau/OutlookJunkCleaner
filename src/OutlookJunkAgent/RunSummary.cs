@@ -21,6 +21,7 @@ public sealed class RunSummary
     public string? FinalText { get; private set; }
     public string? Error { get; private set; }
     public string? AccuracyBlock { get; private set; }
+    public string? ConfigSnapshot { get; private set; }
 
     public void RecordToolCall(string name, string? reason)
     {
@@ -40,12 +41,22 @@ public sealed class RunSummary
 
     public void RecordAccuracy(string rendered) => AccuracyBlock = rendered;
 
+    public void RecordConfigSnapshot(string snapshot) => ConfigSnapshot = snapshot;
+
     public string Render()
     {
         var sb = new StringBuilder();
         sb.AppendLine($"=== run @ {_startedAt:yyyy-MM-dd HH:mm:ss zzz} ===");
         sb.AppendLine($"provider={Provider} model={Model} dryRun={DryRun} runToken={RunToken}");
         sb.AppendLine($"llmTurns={_llmTurns} heuristicTurns={_heuristicTurns} toolCalls={_toolCalls} duration={(DateTimeOffset.Now - _startedAt).TotalSeconds:F1}s");
+        if (ConfigSnapshot is { Length: > 0 })
+        {
+            sb.AppendLine("config:");
+            foreach (var line in ConfigSnapshot.Split('\n'))
+            {
+                sb.AppendLine($"  {line.TrimEnd('\r')}");
+            }
+        }
         if (_events.Count > 0)
         {
             sb.AppendLine("actions:");
