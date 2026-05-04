@@ -16,9 +16,12 @@ namespace OutlookJunkAgent.Sanitizer;
 public sealed class Spotlighter
 {
     private readonly string _runToken;
+    // Case-insensitive: the system-prompt markers are uppercase and the LLM only treats
+    // uppercase as authoritative, but we scrub any case-variation defensively so a mixed-case
+    // marker in the body cannot slip through if a future model relaxes its case-sensitivity.
     private static readonly Regex DelimLike = new(
         @"EMAIL_(BEGIN|END)-[a-fA-F0-9]*",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public Spotlighter() : this(GenerateRunToken()) { }
 
