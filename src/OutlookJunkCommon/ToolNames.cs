@@ -32,4 +32,7 @@ public static class EnvVars
 
     public const string OllamaBaseUrl = "OUTLOOK_JUNK_OLLAMA_BASE_URL";
     public const string OllamaModel = "OUTLOOK_JUNK_OLLAMA_MODEL";
+
+    public const string GroqApiKey = "GROQ_API_KEY";
+    public const string GroqModel = "OUTLOOK_JUNK_GROQ_MODEL";
 }

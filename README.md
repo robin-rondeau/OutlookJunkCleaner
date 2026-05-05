@@ -249,6 +249,38 @@ Then ask things like "what's in Triage and why?" or "show me the last 20 message
 marked as read" - Claude Code uses the same MCP server and the same folder boundary as the
 cron host. This is purely for ad-hoc review; the cron does not depend on Claude Code.
 
+## Free-tier cloud LLM via Groq
+
+If you don't want to pay an Anthropic bill *and* don't want to leave a 70B model loaded on
+your always-on machine, the project ships a third `IAgentDriver` for [Groq Cloud](https://console.groq.com).
+Groq's free tier hosts Llama 3.3 70B at hundreds of tokens/sec and supports `response_format:
+json_schema` (strict), so the same `{action, confidence, reason}` contract the other drivers
+enforce still applies.
+
+> **Privacy caveat — read this first.** Groq's free tier reserves the right to use inputs
+> and outputs to improve their service. The agent will be sending your sanitized junk-mail
+> bodies through their API. If that's not acceptable, stay on Anthropic (paid, no training)
+> or run Ollama locally. Free isn't free of trade-offs.
+
+1. Sign up at <https://console.groq.com> and create an API key.
+2. Set env vars (PowerShell):
+
+   ```powershell
+   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_AGENT_PROVIDER','groq','User')
+   [Environment]::SetEnvironmentVariable('GROQ_API_KEY','gsk_...','User')
+   # Optional override; default is llama-3.3-70b-versatile.
+   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_GROQ_MODEL','llama-3.3-70b-versatile','User')
+   ```
+
+3. Run the agent — same `OutlookJunkAgent.exe`, same MCP server, rubric, cron schedule,
+   sanitization, id scoping, and Phase A/B state.
+
+Free-tier limits at the time of writing are 30 RPM and ~14,400 RPD on `llama-3.3-70b-versatile`,
+plus a per-day token cap. Plenty of headroom for hourly mailbox triage; if you hit a 429 the
+driver retries with exponential backoff and respects `Retry-After`. If a different model is
+substituted via `OUTLOOK_JUNK_GROQ_MODEL`, pick one that supports `response_format: json_schema`
+— otherwise the driver will fall back to Ambiguous@0.0 on every call.
+
 ## Local LLM via Ollama
 
 If you'd rather run a local model than pay per-message API cost (or you don't want an

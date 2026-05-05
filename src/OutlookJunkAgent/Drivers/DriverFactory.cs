@@ -13,6 +13,12 @@ public static class DriverFactory
     public const string DefaultOllamaBaseUrl = "http://localhost:11434";
     public const string DefaultOllamaModel = "llama3.1:8b";
 
+    // Groq's free tier hosts Llama 3.3 70B at hundreds of tok/s and supports response_format
+    // json_schema (strict), so we get the same {action, confidence, reason} guarantee as the
+    // Anthropic and Ollama drivers without paying anything. Free-tier ToS reserves the right
+    // to use inputs/outputs for service improvement — see README.
+    public const string DefaultGroqModel = "llama-3.3-70b-versatile";
+
     public static IAgentDriver Create(ILoggerFactory loggerFactory, out string providerName, out string model)
     {
         var provider = (Environment.GetEnvironmentVariable(EnvVars.AgentProvider) ?? "anthropic").ToLowerInvariant();
@@ -38,10 +44,19 @@ public static class DriverFactory
                 var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
                 return new OllamaAgentDriver(http, baseUrl, model, loggerFactory.CreateLogger<OllamaAgentDriver>());
             }
+            case "groq":
+            {
+                var apiKey = Environment.GetEnvironmentVariable(EnvVars.GroqApiKey)
+                    ?? throw new InvalidOperationException(
+                        $"{EnvVars.GroqApiKey} is not set. Required for the Groq driver.");
+                model = Environment.GetEnvironmentVariable(EnvVars.GroqModel) ?? DefaultGroqModel;
+                var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+                return new GroqAgentDriver(http, apiKey, model, loggerFactory.CreateLogger<GroqAgentDriver>());
+            }
             default:
                 throw new NotSupportedException(
                     $"Unknown {EnvVars.AgentProvider}='{provider}'. " +
-                    "Supported: anthropic, ollama. " +
+                    "Supported: anthropic, ollama, groq. " +
                     "To add another provider, implement IAgentDriver and add a case to DriverFactory.");
         }
     }
