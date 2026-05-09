@@ -18,12 +18,10 @@ The combination is the **hybrid architecture** below.
 
 ## Topology — what runs where
 
-Two machines:
+- **Always-on Windows machine.** The cron, the MCP server, and the agent host all run here.
+- **LLM API**. Choose from Anthropic API, Groq API (free subscription may be adequate), or local ollama. I chose Groq to start and added support for the others but they haven't been tested yet
 
-- **This laptop (WSL).** Dev only. Build, iterate, push to git. Sometimes off / offline.
-- **Always-on Windows machine.** Already has Claude Code for Windows installed (used for ad-hoc interactive review only). The cron, the MCP server, and the agent host all run here.
-
-Layout on the always-on machine:
+Suggested layout on the always-on machine:
 
 ```
 C:\Tools\OutlookJunkCleaner\

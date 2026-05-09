@@ -389,3 +389,7 @@ emission, body/subject scrubbing of foreign / actual / mixed-case markers), and 
 cleaners (`ReasonHygiene` ASCII-strict, `ReasonValidator` UTF-8-preserving — control-char
 strip, CRLF neutralisation, length cap, whitespace collapse). Run `dotnet test` after any
 change to those files.
+
+## License
+
+Released under the [MIT License](LICENSE).
