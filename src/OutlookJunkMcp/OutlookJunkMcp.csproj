@@ -10,9 +10,6 @@
     <AssemblyName>OutlookJunkMcp</AssemblyName>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- Bump on each republish to force a fresh SAC/ISG reputation roll. The version is baked
-         into the assembly metadata, so each value produces a distinct binary hash. -->
-    <Version>1.0.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
