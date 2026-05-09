@@ -34,6 +34,7 @@ list above also qualify on their own; `reason` may be brief, e.g. "in known-junk
   - All-caps subjects with money amounts
   - Pharmacy / weight-loss / "miracle cure" pitches
   - Casino / Slots gambling related subjects
+  - Timeshare related subjects
 - **Body / preview signals:**
   - Asks you to click a link to "verify" / "claim" / "unlock" something with no prior relationship
   - Tracking-pixel-heavy mail with no genuine content
