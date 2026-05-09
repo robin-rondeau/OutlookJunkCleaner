@@ -52,6 +52,11 @@ public sealed class Spotlighter
             ?.Value;
         sb.AppendLine($"auth-results:     {Escape(authResults ?? "<none>")}");
 
+        var messageId = details.RelevantHeaders
+            .FirstOrDefault(h => string.Equals(h.Name, "Message-ID", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        sb.AppendLine($"message-id:       {Escape(messageId ?? "<none>")}");
+
         var replyTo = details.RelevantHeaders
             .FirstOrDefault(h => string.Equals(h.Name, "Reply-To", StringComparison.OrdinalIgnoreCase))
             ?.Value;

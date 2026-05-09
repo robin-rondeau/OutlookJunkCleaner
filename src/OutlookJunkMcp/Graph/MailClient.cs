@@ -325,7 +325,7 @@ public sealed class MailClient
         {
             "List-Unsubscribe", "List-Unsubscribe-Post", "List-Id",
             "Authentication-Results", "Received-SPF", "DKIM-Signature",
-            "Return-Path", "Reply-To",
+            "Return-Path", "Reply-To", "Message-ID",
         };
         var headers = msg?.InternetMessageHeaders;
         if (headers is null) return [];
