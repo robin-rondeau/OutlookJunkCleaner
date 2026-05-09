@@ -253,9 +253,11 @@ cron host. This is purely for ad-hoc review; the cron does not depend on Claude 
 
 If you don't want to pay an Anthropic bill *and* don't want to leave a 70B model loaded on
 your always-on machine, the project ships a third `IAgentDriver` for [Groq Cloud](https://console.groq.com).
-Groq's free tier hosts Llama 3.3 70B at hundreds of tokens/sec and supports `response_format:
-json_schema` (strict), so the same `{action, confidence, reason}` contract the other drivers
-enforce still applies.
+Groq's free tier hosts Llama 3.3 70B at hundreds of tokens/sec. The driver pins the output
+to JSON via `response_format: json_object` and augments the system prompt with the
+`{action, confidence, reason}` shape directive — Groq's strict `json_schema` mode is gated to
+a small list of models that doesn't include `llama-3.3-70b-versatile`, so we get the same
+contract the other drivers produce via prompt-shape + parse-time validation instead.
 
 > **Privacy caveat — read this first.** Groq's free tier reserves the right to use inputs
 > and outputs to improve their service. The agent will be sending your sanitized junk-mail
@@ -277,9 +279,11 @@ enforce still applies.
 
 Free-tier limits at the time of writing are 30 RPM and ~14,400 RPD on `llama-3.3-70b-versatile`,
 plus a per-day token cap. Plenty of headroom for hourly mailbox triage; if you hit a 429 the
-driver retries with exponential backoff and respects `Retry-After`. If a different model is
-substituted via `OUTLOOK_JUNK_GROQ_MODEL`, pick one that supports `response_format: json_schema`
-— otherwise the driver will fall back to Ambiguous@0.0 on every call.
+driver retries with exponential backoff and respects `Retry-After`. The driver uses
+`response_format: json_object` so any Groq model that supports that mode (essentially all of
+them) will work as a substitute via `OUTLOOK_JUNK_GROQ_MODEL`; smaller / less-capable models
+are more likely to drift off the `{action, confidence, reason}` shape and land in
+Ambiguous@0.0 fallback on bad output, which is the safe behaviour.
 
 ## Local LLM via Ollama
 

@@ -13,10 +13,12 @@ public static class DriverFactory
     public const string DefaultOllamaBaseUrl = "http://localhost:11434";
     public const string DefaultOllamaModel = "llama3.1:8b";
 
-    // Groq's free tier hosts Llama 3.3 70B at hundreds of tok/s and supports response_format
-    // json_schema (strict), so we get the same {action, confidence, reason} guarantee as the
-    // Anthropic and Ollama drivers without paying anything. Free-tier ToS reserves the right
-    // to use inputs/outputs for service improvement — see README.
+    // Groq's free tier hosts Llama 3.3 70B at hundreds of tok/s. The driver uses
+    // response_format: json_object (universally supported) plus a system-prompt directive that
+    // pins the output shape to the same {action, confidence, reason} contract the other
+    // drivers produce. Strict json_schema is gated to a small list of Groq models that does
+    // not include this one. Free-tier ToS reserves the right to use inputs/outputs for service
+    // improvement — see README.
     public const string DefaultGroqModel = "llama-3.3-70b-versatile";
 
     public static IAgentDriver Create(ILoggerFactory loggerFactory, out string providerName, out string model)
