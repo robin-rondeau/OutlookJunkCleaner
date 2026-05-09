@@ -146,6 +146,8 @@ On the always-on Windows machine:
        OutlookJunkAgent.exe
    ```
 
+   **Security Note:** If you have **Windows Security Smart App Control** enabled, it may block the .exe files created by this project as they are not signed. I had to disable SAC on the machine where the cron jobs are running. _Only do so if you are aware of the risk and comfortable with the security feature disabled_.
+
    For tighter ACLs on the prompt-shaping inputs, optionally move `rubric.md` and
    `senders.json` to `%LocalAppData%\OutlookJunkAgent\` instead. The agent prefers that path
    and falls back to the working directory when absent. Either way, the SHA-256 of each file
