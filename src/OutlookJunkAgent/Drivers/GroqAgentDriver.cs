@@ -27,6 +27,9 @@ public sealed class GroqAgentDriver : IAgentDriver
     private const string Endpoint = "https://api.groq.com/openai/v1/chat/completions";
     private const int MaxCompletionTokens = 256;
     private const int MaxAttempts = 3;
+    // Fallback cap when the caller doesn't supply a run deadline. Production code always passes
+    // one; this exists so tests and ad-hoc usage don't accidentally inherit unbounded waits.
+    private const int FallbackMaxRetryAfterSeconds = 30;
     private const string RequestIdHeader = "x-request-id";
 
     // The shared system prompt (RubricLoader) talks about "the classify tool" because the
@@ -74,11 +77,11 @@ preamble. The object must have exactly these fields:
             },
         };
 
-        var raw = await SendWithRetryAsync(body, ct).ConfigureAwait(false);
+        var raw = await SendWithRetryAsync(body, req.Deadline, ct).ConfigureAwait(false);
         return ParseResponse(raw);
     }
 
-    private async Task<string> SendWithRetryAsync(JsonObject body, CancellationToken ct)
+    private async Task<string> SendWithRetryAsync(JsonObject body, DateTimeOffset? deadline, CancellationToken ct)
     {
         var rand = Random.Shared;
 
@@ -99,6 +102,23 @@ preamble. The object must have exactly these fields:
                     return raw;
                 }
 
+                if (IsTransient(resp.StatusCode)
+                    && TryGetServerRetryAfter(resp.Headers, out var serverDelay))
+                {
+                    var remaining = deadline.HasValue
+                        ? deadline.Value - DateTimeOffset.Now
+                        : TimeSpan.FromSeconds(FallbackMaxRetryAfterSeconds);
+                    if (serverDelay > remaining)
+                    {
+                        throw new GroqRateLimitException(
+                            serverDelay,
+                            requestId,
+                            $"Groq {(int)resp.StatusCode}: server asks to wait {serverDelay.TotalSeconds:F0}s, " +
+                            $"exceeds remaining run budget ({remaining.TotalSeconds:F0}s). " +
+                            $"request-id={requestId ?? "?"} body={Truncate(raw, 500)}");
+                    }
+                }
+
                 if (!IsTransient(resp.StatusCode) || attempt == MaxAttempts)
                 {
                     throw new InvalidOperationException(
@@ -108,7 +128,7 @@ preamble. The object must have exactly these fields:
 
                 var delay = ComputeRetryDelay(attempt, resp.Headers, rand);
                 _log.LogWarning(
-                    "Groq {Status} on attempt {N}/{Max} (request-id={Rid}); retrying in {Delay}s",
+                    "Groq {Status} on attempt {N}/{Max} (request-id={Rid}); retrying in {Delay:F1}s",
                     (int)resp.StatusCode, attempt, MaxAttempts, requestId ?? "?", delay.TotalSeconds);
                 resp.Dispose();
                 resp = null;
@@ -157,19 +177,34 @@ preamble. The object must have exactly these fields:
 
     private static TimeSpan ComputeRetryDelay(int attempt, HttpResponseHeaders headers, Random rand)
     {
+        if (TryGetServerRetryAfter(headers, out var serverDelay))
+        {
+            return AddJitter(serverDelay, rand);
+        }
+        return ComputeBackoff(attempt, rand);
+    }
+
+    private static bool TryGetServerRetryAfter(HttpResponseHeaders headers, out TimeSpan delay)
+    {
         if (headers.RetryAfter is { } ra)
         {
-            if (ra.Delta is TimeSpan delta && delta > TimeSpan.Zero)
+            if (ra.Delta is TimeSpan d && d > TimeSpan.Zero)
             {
-                return AddJitter(delta, rand);
+                delay = d;
+                return true;
             }
             if (ra.Date is DateTimeOffset when)
             {
-                var d = when - DateTimeOffset.UtcNow;
-                if (d > TimeSpan.Zero) return AddJitter(d, rand);
+                var diff = when - DateTimeOffset.UtcNow;
+                if (diff > TimeSpan.Zero)
+                {
+                    delay = diff;
+                    return true;
+                }
             }
         }
-        return ComputeBackoff(attempt, rand);
+        delay = TimeSpan.Zero;
+        return false;
     }
 
     private static TimeSpan ComputeBackoff(int attempt, Random rand)
@@ -314,4 +349,22 @@ preamble. The object must have exactly these fields:
             RawText: Truncate(raw, 500));
 
     private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+}
+
+/// <summary>
+/// Thrown when Groq returns a transient error with a Retry-After value that exceeds the remaining
+/// run budget. Signals to the host that the entire run should abort rather than burn time waiting
+/// for a quota window that won't close before the outer cancellation fires.
+/// </summary>
+public sealed class GroqRateLimitException : Exception
+{
+    public TimeSpan RetryAfter { get; }
+    public string? RequestId { get; }
+
+    public GroqRateLimitException(TimeSpan retryAfter, string? requestId, string message)
+        : base(message)
+    {
+        RetryAfter = retryAfter;
+        RequestId = requestId;
+    }
 }

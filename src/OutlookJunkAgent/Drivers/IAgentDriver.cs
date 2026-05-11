@@ -18,7 +18,8 @@ public interface IAgentDriver
 
 public sealed record ClassificationRequest(
     string SystemPrompt,
-    string SpotlightedEmail);
+    string SpotlightedEmail,
+    DateTimeOffset? Deadline = null);
 
 public sealed record ClassificationResult(
     ClassificationAction Action,

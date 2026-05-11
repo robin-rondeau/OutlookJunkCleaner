@@ -72,7 +72,9 @@ try
     // Must fire before the 10-minute Task Scheduler ExecutionTimeLimit (see install-task.ps1)
     // so the run gets a chance to catch the cancellation, flush the audit log, and exit cleanly
     // rather than being hard-killed mid-mutation.
-    using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(9));
+    var runBudget = TimeSpan.FromMinutes(9);
+    var runDeadline = DateTimeOffset.Now + runBudget;
+    using var cts = new CancellationTokenSource(runBudget);
     await using var mcp = await McpClientHost.ConnectAsync(serverPath, loggerFactory.CreateLogger<McpClientHost>(), cts.Token);
 
     var toolNames = await mcp.DiscoverToolNamesAsync(cts.Token);
@@ -164,7 +166,7 @@ try
             {
                 var spotlighted = spotlighter.Wrap(details);
                 decision = await driver.ClassifyAsync(
-                    new ClassificationRequest(systemPrompt, spotlighted), cts.Token);
+                    new ClassificationRequest(systemPrompt, spotlighted, runDeadline), cts.Token);
                 classifierKind = "llm";
                 classifierLabel = $"llm conf={decision.Confidence:F2}";
                 summary.RecordLlmTurn();
@@ -220,6 +222,19 @@ try
                 "[{Id}] processing finished at {End:HH:mm:ss.fff} (elapsed={Elapsed:F3}s)",
                 msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
         }
+        catch (GroqRateLimitException rle)
+        {
+            msgStopwatch.Stop();
+            log.LogError(
+                "[{Id}] rate-limited at {End:HH:mm:ss.fff} after {Elapsed:F3}s; server asks {RetryAfter:F0}s, exceeds remaining run budget. Aborting run (request-id={Rid}).",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds, rle.RetryAfter.TotalSeconds, rle.RequestId ?? "?");
+            summary.RecordToolCall(
+                "rate-limit-abort",
+                $"id={msg.Id} retry-after={rle.RetryAfter.TotalSeconds:F0}s request-id={rle.RequestId ?? "?"}");
+            summary.RecordError(rle);
+            summary.RecordFinal($"aborted at {processed} of {working.Count} messages due to rate limit");
+            break;
+        }
         catch (OperationCanceledException)
         {
             msgStopwatch.Stop();
@@ -238,7 +253,10 @@ try
         }
     }
 
-    summary.RecordFinal($"processed {processed} of {working.Count} messages");
+    if (summary.Error is null)
+    {
+        summary.RecordFinal($"processed {processed} of {working.Count} messages");
+    }
 }
 catch (Exception ex)
 {
