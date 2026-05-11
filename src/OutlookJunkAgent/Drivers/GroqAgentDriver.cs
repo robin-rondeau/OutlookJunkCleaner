@@ -26,7 +26,7 @@ public sealed class GroqAgentDriver : IAgentDriver
 {
     private const string Endpoint = "https://api.groq.com/openai/v1/chat/completions";
     private const int MaxCompletionTokens = 256;
-    private const int MaxAttempts = 5;
+    private const int MaxAttempts = 3;
     private const string RequestIdHeader = "x-request-id";
 
     // The shared system prompt (RubricLoader) talks about "the classify tool" because the

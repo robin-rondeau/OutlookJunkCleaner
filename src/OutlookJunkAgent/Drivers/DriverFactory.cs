@@ -52,7 +52,10 @@ public static class DriverFactory
                     ?? throw new InvalidOperationException(
                         $"{EnvVars.GroqApiKey} is not set. Required for the Groq driver.");
                 model = Environment.GetEnvironmentVariable(EnvVars.GroqModel) ?? DefaultGroqModel;
-                var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+                // Groq llama-3.3-70b-versatile with 256 max_completion_tokens typically replies in
+                // 1-5s. A tight per-attempt HTTP timeout means a single wedged TCP connection can't
+                // burn through the 9-minute outer run cap before the retry loop notices and fails over.
+                var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
                 return new GroqAgentDriver(http, apiKey, model, loggerFactory.CreateLogger<GroqAgentDriver>());
             }
             default:

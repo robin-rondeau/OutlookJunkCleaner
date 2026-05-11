@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using OutlookJunkAgent;
 using OutlookJunkAgent.Drivers;
@@ -140,6 +141,10 @@ try
         if (processed >= maxMessages) break;
         processed++;
 
+        var msgStart = DateTimeOffset.Now;
+        var msgStopwatch = Stopwatch.StartNew();
+        log.LogInformation("[{Id}] processing started at {Start:HH:mm:ss.fff}", msg.Id, msgStart);
+
         try
         {
             var details = await mcp.GetMessageAsync(msg.Id, cts.Token);
@@ -209,14 +214,26 @@ try
                 Provider: providerName,
                 Model: modelName,
                 ClassifierKind: classifierKind), cts.Token);
+
+            msgStopwatch.Stop();
+            log.LogInformation(
+                "[{Id}] processing finished at {End:HH:mm:ss.fff} (elapsed={Elapsed:F3}s)",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
         }
         catch (OperationCanceledException)
         {
+            msgStopwatch.Stop();
+            log.LogWarning(
+                "[{Id}] canceled at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
             throw;
         }
         catch (Exception ex)
         {
-            log.LogWarning(ex, "Classification failed for {Id}", msg.Id);
+            msgStopwatch.Stop();
+            log.LogWarning(ex,
+                "[{Id}] classification failed at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
             summary.RecordToolCall("error", $"id={msg.Id} {ex.GetType().Name}: {ex.Message}");
         }
     }
