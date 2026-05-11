@@ -136,7 +136,12 @@ try
         "Starting per-message classifier (provider={P} model={M} runToken={Rt} dryRun={D} working={N} cap={C})",
         providerName, modelName, spotlighter.RunToken, dryRun, working.Count, maxMessages);
 
+    // Two-phase processing: drain every heuristic-classifiable message first, before any LLM
+    // API calls. That way a rate limit, network failure, or task cancellation during the LLM
+    // phase doesn't strand the heuristic decisions that were already determined locally.
+    var deferredForLlm = new List<(MessageSummary Msg, MessageContent Details)>();
     var processed = 0;
+
     foreach (var msg in working)
     {
         cts.Token.ThrowIfCancellationRequested();
@@ -145,101 +150,37 @@ try
 
         var msgStart = DateTimeOffset.Now;
         var msgStopwatch = Stopwatch.StartNew();
-        log.LogInformation("[{Id}] processing started at {Start:HH:mm:ss.fff}", msg.Id, msgStart);
+        log.LogInformation("[{Id}] heuristic pass started at {Start:HH:mm:ss.fff}", msg.Id, msgStart);
 
         try
         {
             var details = await mcp.GetMessageAsync(msg.Id, cts.Token);
-
-            ClassificationResult decision;
-            string classifierKind;
-            string classifierLabel;
             var heuristic = heuristics.Classify(details);
             if (heuristic is not null)
             {
-                decision = new ClassificationResult(heuristic.Action, 1.0, heuristic.Reason, RawText: null);
-                classifierKind = "heuristic";
-                classifierLabel = heuristic.HeuristicId;
+                var decision = new ClassificationResult(heuristic.Action, 1.0, heuristic.Reason, RawText: null);
                 summary.RecordHeuristicTurn();
+                await ApplyDecisionAsync(msg, decision, "heuristic", heuristic.HeuristicId);
+
+                msgStopwatch.Stop();
+                log.LogInformation(
+                    "[{Id}] heuristic pass finished at {End:HH:mm:ss.fff} (elapsed={Elapsed:F3}s)",
+                    msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
             }
             else
             {
-                var spotlighted = spotlighter.Wrap(details);
-                decision = await driver.ClassifyAsync(
-                    new ClassificationRequest(systemPrompt, spotlighted, runDeadline), cts.Token);
-                classifierKind = "llm";
-                classifierLabel = $"llm conf={decision.Confidence:F2}";
-                summary.RecordLlmTurn();
+                deferredForLlm.Add((msg, details));
+                msgStopwatch.Stop();
+                log.LogInformation(
+                    "[{Id}] deferred to LLM pass (elapsed={Elapsed:F3}s)",
+                    msg.Id, msgStopwatch.Elapsed.TotalSeconds);
             }
-
-            var cleanedReason = ReasonHygiene.Clean(decision.Reason);
-            log.LogInformation(
-                "[{Id}] {Action} ({Label}) — {Reason}",
-                msg.Id, decision.Action, classifierLabel, cleanedReason);
-
-            var auditReason = $"agent-asserted: {cleanedReason}";
-            var targetTool = ActionToTool(decision.Action, deleteEnabled);
-
-            if (dryRun)
-            {
-                summary.RecordToolCall($"would:{targetTool}", auditReason);
-                continue;
-            }
-
-            switch (decision.Action)
-            {
-                case ClassificationAction.ConfidentJunk when deleteEnabled:
-                    await mcp.DeleteFromJunkAsync(msg.Id, cleanedReason, cts.Token);
-                    summary.RecordToolCall(ToolNames.DeleteFromJunk, auditReason);
-                    break;
-                case ClassificationAction.ConfidentJunk:
-                    await mcp.MarkAsReadAsync(msg.Id, cleanedReason, cts.Token);
-                    summary.RecordToolCall(ToolNames.MarkAsRead, auditReason);
-                    break;
-                case ClassificationAction.Ambiguous:
-                case ClassificationAction.NotJunk:
-                    await mcp.MoveToTriageAsync(msg.Id, cleanedReason, cts.Token);
-                    summary.RecordToolCall(ToolNames.MoveToTriage, auditReason);
-                    break;
-            }
-
-            // Record only after a successful mutation, so the history reflects what the user
-            // could actually have observed in their mailbox. Dry-run classifications never
-            // change folder state and would falsely register as "user agreed" in the lookup.
-            await history.AppendAsync(new HistoryEntry(
-                Timestamp: DateTimeOffset.UtcNow,
-                MessageId: msg.Id,
-                AgentDecision: ActionToHistoryString(decision.Action),
-                AgentReason: cleanedReason,
-                RunToken: spotlighter.RunToken,
-                Phase: phaseLabel,
-                Provider: providerName,
-                Model: modelName,
-                ClassifierKind: classifierKind), cts.Token);
-
-            msgStopwatch.Stop();
-            log.LogInformation(
-                "[{Id}] processing finished at {End:HH:mm:ss.fff} (elapsed={Elapsed:F3}s)",
-                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
-        }
-        catch (GroqRateLimitException rle)
-        {
-            msgStopwatch.Stop();
-            log.LogError(
-                "[{Id}] rate-limited at {End:HH:mm:ss.fff} after {Elapsed:F3}s; server asks {RetryAfter:F0}s, exceeds remaining run budget. Aborting run (request-id={Rid}).",
-                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds, rle.RetryAfter.TotalSeconds, rle.RequestId ?? "?");
-            summary.RecordToolCall(
-                "rate-limit-abort",
-                $"id={msg.Id} retry-after={rle.RetryAfter.TotalSeconds:F0}s request-id={rle.RequestId ?? "?"}");
-            summary.RecordError(rle);
-            summary.RecordFinal($"aborted at {processed} of {working.Count} messages due to rate limit");
-            break;
         }
         catch (OperationCanceledException)
         {
             msgStopwatch.Stop();
             log.LogWarning(
-                "[{Id}] canceled at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
+                "[{Id}] canceled in heuristic pass at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
                 msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
             throw;
         }
@@ -247,15 +188,129 @@ try
         {
             msgStopwatch.Stop();
             log.LogWarning(ex,
-                "[{Id}] classification failed at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
+                "[{Id}] heuristic pass failed at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
                 msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
             summary.RecordToolCall("error", $"id={msg.Id} {ex.GetType().Name}: {ex.Message}");
         }
     }
 
-    if (summary.Error is null)
+    log.LogInformation(
+        "Heuristic pass complete; {N} message(s) deferred to LLM",
+        deferredForLlm.Count);
+
+    var llmAborted = false;
+    var llmProcessed = 0;
+    foreach (var (msg, details) in deferredForLlm)
     {
-        summary.RecordFinal($"processed {processed} of {working.Count} messages");
+        cts.Token.ThrowIfCancellationRequested();
+
+        var msgStart = DateTimeOffset.Now;
+        var msgStopwatch = Stopwatch.StartNew();
+        log.LogInformation("[{Id}] LLM pass started at {Start:HH:mm:ss.fff}", msg.Id, msgStart);
+
+        try
+        {
+            var spotlighted = spotlighter.Wrap(details);
+            var decision = await driver.ClassifyAsync(
+                new ClassificationRequest(systemPrompt, spotlighted, runDeadline), cts.Token);
+            summary.RecordLlmTurn();
+            await ApplyDecisionAsync(msg, decision, "llm", $"llm conf={decision.Confidence:F2}");
+            llmProcessed++;
+
+            msgStopwatch.Stop();
+            log.LogInformation(
+                "[{Id}] LLM pass finished at {End:HH:mm:ss.fff} (elapsed={Elapsed:F3}s)",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
+        }
+        catch (GroqRateLimitException rle)
+        {
+            msgStopwatch.Stop();
+            log.LogError(
+                "[{Id}] rate-limited at {End:HH:mm:ss.fff} after {Elapsed:F3}s; server asks {RetryAfter:F0}s, exceeds remaining run budget. Aborting LLM pass (request-id={Rid}).",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds, rle.RetryAfter.TotalSeconds, rle.RequestId ?? "?");
+            summary.RecordToolCall(
+                "rate-limit-abort",
+                $"id={msg.Id} retry-after={rle.RetryAfter.TotalSeconds:F0}s request-id={rle.RequestId ?? "?"}");
+            summary.RecordError(rle);
+            llmAborted = true;
+            break;
+        }
+        catch (OperationCanceledException)
+        {
+            msgStopwatch.Stop();
+            log.LogWarning(
+                "[{Id}] canceled in LLM pass at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            msgStopwatch.Stop();
+            log.LogWarning(ex,
+                "[{Id}] LLM classification failed at {End:HH:mm:ss.fff} after {Elapsed:F3}s",
+                msg.Id, DateTimeOffset.Now, msgStopwatch.Elapsed.TotalSeconds);
+            summary.RecordToolCall("error", $"id={msg.Id} {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    if (llmAborted)
+    {
+        summary.RecordFinal(
+            $"aborted in LLM pass: {processed} of {working.Count} heuristic-attempted, " +
+            $"{llmProcessed} of {deferredForLlm.Count} LLM-classified before rate-limit abort");
+    }
+    else
+    {
+        summary.RecordFinal(
+            $"processed {processed} of {working.Count} messages ({llmProcessed} via LLM)");
+    }
+
+    async Task ApplyDecisionAsync(MessageSummary msg, ClassificationResult decision, string classifierKind, string classifierLabel)
+    {
+        var cleanedReason = ReasonHygiene.Clean(decision.Reason);
+        log.LogInformation(
+            "[{Id}] {Action} ({Label}) — {Reason}",
+            msg.Id, decision.Action, classifierLabel, cleanedReason);
+
+        var auditReason = $"agent-asserted: {cleanedReason}";
+        var targetTool = ActionToTool(decision.Action, deleteEnabled);
+
+        if (dryRun)
+        {
+            summary.RecordToolCall($"would:{targetTool}", auditReason);
+            return;
+        }
+
+        switch (decision.Action)
+        {
+            case ClassificationAction.ConfidentJunk when deleteEnabled:
+                await mcp.DeleteFromJunkAsync(msg.Id, cleanedReason, cts.Token);
+                summary.RecordToolCall(ToolNames.DeleteFromJunk, auditReason);
+                break;
+            case ClassificationAction.ConfidentJunk:
+                await mcp.MarkAsReadAsync(msg.Id, cleanedReason, cts.Token);
+                summary.RecordToolCall(ToolNames.MarkAsRead, auditReason);
+                break;
+            case ClassificationAction.Ambiguous:
+            case ClassificationAction.NotJunk:
+                await mcp.MoveToTriageAsync(msg.Id, cleanedReason, cts.Token);
+                summary.RecordToolCall(ToolNames.MoveToTriage, auditReason);
+                break;
+        }
+
+        // Record only after a successful mutation, so the history reflects what the user
+        // could actually have observed in their mailbox. Dry-run classifications never change
+        // folder state and would falsely register as "user agreed" in the lookup.
+        await history.AppendAsync(new HistoryEntry(
+            Timestamp: DateTimeOffset.UtcNow,
+            MessageId: msg.Id,
+            AgentDecision: ActionToHistoryString(decision.Action),
+            AgentReason: cleanedReason,
+            RunToken: spotlighter.RunToken,
+            Phase: phaseLabel,
+            Provider: providerName,
+            Model: modelName,
+            ClassifierKind: classifierKind), cts.Token);
     }
 }
 catch (Exception ex)
