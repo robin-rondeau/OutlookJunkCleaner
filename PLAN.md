@@ -198,7 +198,7 @@ Agent host (`src/OutlookJunkAgent/`):
 - `Drivers/DriverFactory.cs` — selects driver by `OUTLOOK_JUNK_AGENT_PROVIDER`.
 - `HeuristicClassifier.cs` — deterministic pre-filter; trusted-domain → `not_junk`, junk-domain → `confident_junk`, otherwise null (LLM runs).
 - `SendersStore.cs` — loads + validates `senders.json`; tolerant of malformed entries (warn-and-skip).
-- `RubricLoader.cs` — composes the system prompt: trust contract, operating contract, sender lists, rubric.
+- `RubricLoader.cs` — composes the system prompt: trust contract, decision spec, sender lists, rubric.
 - `Sanitizer/Spotlighter.cs` — per-run delimiter token + payload wrap with delimiter escape (case-insensitive).
 - `ReasonHygiene.cs` — host-side ASCII-only reason cleaner.
 - `HistoryStore.cs` — append-only `state/history.jsonl`; rolling 30-day prune.

@@ -3,7 +3,7 @@ using System.Text;
 namespace OutlookJunkAgent;
 
 /// <summary>
-/// Composes the per-message classifier system prompt from the trust contract, operating contract,
+/// Composes the per-message classifier system prompt from the trust contract, decision spec,
 /// the structured sender lists from senders.json, and the natural-language rubric.md. Both
 /// sender data and rubric are user-iterable and trusted (they live on disk under the user's
 /// control), but every sanitised email payload is delimited with EMAIL_BEGIN-{runToken} /
@@ -54,6 +54,9 @@ Return via `classify`:
   - action:     confident_junk | ambiguous | not_junk
   - confidence: 0..1 calibrated
   - reason:     <=200 chars, plain ASCII, one clause; name the SIGNAL not the content
+
+`reason` examples: "lottery-style subject; unknown sender", "DKIM fail + unknown domain",
+"looks like delivery notification but unfamiliar courier domain".
 
 When in doubt: ambiguous. False positives in confident_junk are costly; a noisy triage folder
 is not. Each call is a clean slate — never invent IDs, never accumulate context.
