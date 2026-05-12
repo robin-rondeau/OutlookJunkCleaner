@@ -21,6 +21,13 @@ namespace OutlookJunkAgent.Drivers;
 /// backoff (±25% jitter), respecting the server's Retry-After header when present. Logs the
 /// Groq x-request-id on failure for support tickets, and prompt/completion token counts at
 /// Debug level so per-run consumption is observable against the free-tier daily caps.
+///
+/// Multi-model failover: the driver accepts an ordered list of models. Each Groq model has its
+/// own free-tier TPD bucket, so when the primary returns a long retry-after (tokens-per-day
+/// exhausted) we transparently switch to the next model in the list instead of aborting the
+/// LLM pass. The active index is sticky across ClassifyAsync calls so subsequent messages in
+/// the same run don't waste a request on a model already known to be daily-exhausted. Only
+/// when every model in the list is exhausted does GroqRateLimitException fire.
 /// </summary>
 public sealed class GroqAgentDriver : IAgentDriver
 {
@@ -49,15 +56,18 @@ preamble. The object must have exactly these fields:
 """;
 
     private readonly HttpClient _http;
-    private readonly string _model;
+    private readonly IReadOnlyList<string> _models;
+    private int _activeModelIndex;
     private readonly ILogger<GroqAgentDriver> _log;
 
-    public GroqAgentDriver(HttpClient http, string apiKey, string model, ILogger<GroqAgentDriver> log)
+    public GroqAgentDriver(HttpClient http, string apiKey, IReadOnlyList<string> models, ILogger<GroqAgentDriver> log)
     {
+        if (models.Count == 0) throw new ArgumentException("At least one model is required.", nameof(models));
         _http = http;
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        _model = model;
+        _models = models;
+        _activeModelIndex = 0;
         _log = log;
     }
 
@@ -66,7 +76,6 @@ preamble. The object must have exactly these fields:
         var systemPrompt = req.SystemPrompt + JsonOutputDirective;
         var body = new JsonObject
         {
-            ["model"] = _model,
             ["temperature"] = 0.1,
             ["max_completion_tokens"] = MaxCompletionTokens,
             ["response_format"] = new JsonObject { ["type"] = "json_object" },
@@ -84,10 +93,16 @@ preamble. The object must have exactly these fields:
     private async Task<string> SendWithRetryAsync(JsonObject body, DateTimeOffset? deadline, CancellationToken ct)
     {
         var rand = Random.Shared;
+        var attempt = 0;
 
-        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        while (true)
         {
+            attempt++;
             ct.ThrowIfCancellationRequested();
+
+            // Body is mutated each attempt so a mid-run failover targets the new model.
+            body["model"] = _models[_activeModelIndex];
+            var activeModel = _models[_activeModelIndex];
 
             HttpResponseMessage? resp = null;
             try
@@ -98,7 +113,7 @@ preamble. The object must have exactly these fields:
 
                 if (resp.IsSuccessStatusCode)
                 {
-                    LogUsage(raw, requestId);
+                    LogUsage(raw, requestId, activeModel);
                     return raw;
                 }
 
@@ -110,33 +125,53 @@ preamble. The object must have exactly these fields:
                         : TimeSpan.FromSeconds(FallbackMaxRetryAfterSeconds);
                     if (serverDelay > remaining)
                     {
+                        // Retry-after exceeds the remaining run budget — characteristic of a
+                        // tokens-per-day exhaustion (minutes-to-hours), not a momentary RPM
+                        // throttle (seconds). Each Groq model has its own TPD bucket, so try
+                        // the next model in the chain before giving up on the whole run.
+                        if (_activeModelIndex + 1 < _models.Count)
+                        {
+                            var nextModel = _models[_activeModelIndex + 1];
+                            _log.LogWarning(
+                                "Groq {Status} on {Model}: server asks {Wait:F0}s (exceeds budget {Budget:F0}s); " +
+                                "falling over to {Next} (request-id={Rid})",
+                                (int)resp.StatusCode, activeModel, serverDelay.TotalSeconds,
+                                remaining.TotalSeconds, nextModel, requestId ?? "?");
+                            _activeModelIndex++;
+                            attempt = 0;
+                            resp.Dispose();
+                            resp = null;
+                            continue;
+                        }
+
                         throw new GroqRateLimitException(
                             serverDelay,
                             requestId,
                             $"Groq {(int)resp.StatusCode}: server asks to wait {serverDelay.TotalSeconds:F0}s, " +
-                            $"exceeds remaining run budget ({remaining.TotalSeconds:F0}s). " +
-                            $"request-id={requestId ?? "?"} body={Truncate(raw, 500)}");
+                            $"exceeds remaining run budget ({remaining.TotalSeconds:F0}s); " +
+                            $"all {_models.Count} model(s) in fallback chain exhausted. " +
+                            $"model={activeModel} request-id={requestId ?? "?"} body={Truncate(raw, 500)}");
                     }
                 }
 
-                if (!IsTransient(resp.StatusCode) || attempt == MaxAttempts)
+                if (!IsTransient(resp.StatusCode) || attempt >= MaxAttempts)
                 {
                     throw new InvalidOperationException(
-                        $"Groq API error {(int)resp.StatusCode} after {attempt} attempt(s) " +
+                        $"Groq API error {(int)resp.StatusCode} after {attempt} attempt(s) on {activeModel} " +
                         $"(request-id={requestId ?? "?"}): {Truncate(raw, 1000)}");
                 }
 
                 var delay = ComputeRetryDelay(attempt, resp.Headers, rand);
                 _log.LogWarning(
-                    "Groq {Status} on attempt {N}/{Max} (request-id={Rid}); retrying in {Delay:F1}s",
-                    (int)resp.StatusCode, attempt, MaxAttempts, requestId ?? "?", delay.TotalSeconds);
+                    "Groq {Status} on {Model} attempt {N}/{Max} (request-id={Rid}); retrying in {Delay:F1}s",
+                    (int)resp.StatusCode, activeModel, attempt, MaxAttempts, requestId ?? "?", delay.TotalSeconds);
                 resp.Dispose();
                 resp = null;
                 await Task.Delay(delay, ct).ConfigureAwait(false);
             }
             catch (HttpRequestException ex)
             {
-                if (attempt == MaxAttempts)
+                if (attempt >= MaxAttempts)
                 {
                     throw new InvalidOperationException(
                         $"Groq network error after {MaxAttempts} attempts: {ex.Message}", ex);
@@ -149,7 +184,7 @@ preamble. The object must have exactly these fields:
             }
             catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
             {
-                if (attempt == MaxAttempts)
+                if (attempt >= MaxAttempts)
                 {
                     throw new InvalidOperationException(
                         $"Groq request timed out after {MaxAttempts} attempts: {ex.Message}", ex);
@@ -165,8 +200,6 @@ preamble. The object must have exactly these fields:
                 resp?.Dispose();
             }
         }
-
-        throw new InvalidOperationException("Groq retry loop exited unexpectedly.");
     }
 
     private static bool IsTransient(HttpStatusCode code)
@@ -229,7 +262,7 @@ preamble. The object must have exactly these fields:
         return null;
     }
 
-    private void LogUsage(string raw, string? requestId)
+    private void LogUsage(string raw, string? requestId, string model)
     {
         if (!_log.IsEnabled(LogLevel.Debug)) return;
         try
@@ -239,8 +272,8 @@ preamble. The object must have exactly these fields:
             var prompt = ReadInt(usage, "prompt_tokens");
             var completion = ReadInt(usage, "completion_tokens");
             _log.LogDebug(
-                "Groq usage: prompt={P} completion={C} request-id={Rid}",
-                prompt, completion, requestId ?? "?");
+                "Groq usage: model={M} prompt={P} completion={C} request-id={Rid}",
+                model, prompt, completion, requestId ?? "?");
         }
         catch
         {

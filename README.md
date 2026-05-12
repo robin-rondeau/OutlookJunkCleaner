@@ -272,20 +272,25 @@ contract the other drivers produce via prompt-shape + parse-time validation inst
    ```powershell
    [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_AGENT_PROVIDER','groq','User')
    [Environment]::SetEnvironmentVariable('GROQ_API_KEY','gsk_...','User')
-   # Optional override; default is llama-3.3-70b-versatile.
-   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_GROQ_MODEL','llama-3.3-70b-versatile','User')
+   # Optional override; default is a comma-separated fallback chain:
+   #   llama-3.3-70b-versatile,llama-3.1-8b-instant
+   # Each model has its own free-tier daily token bucket; when the primary exhausts
+   # its TPD the driver fails over to the next instead of aborting the run.
+   [Environment]::SetEnvironmentVariable('OUTLOOK_JUNK_GROQ_MODEL','llama-3.3-70b-versatile,llama-3.1-8b-instant','User')
    ```
 
 3. Run the agent — same `OutlookJunkAgent.exe`, same MCP server, rubric, cron schedule,
    sanitization, id scoping, and Phase A/B state.
 
 Free-tier limits at the time of writing are 30 RPM and ~14,400 RPD on `llama-3.3-70b-versatile`,
-plus a per-day token cap. Plenty of headroom for hourly mailbox triage; if you hit a 429 the
-driver retries with exponential backoff and respects `Retry-After`. The driver uses
-`response_format: json_object` so any Groq model that supports that mode (essentially all of
-them) will work as a substitute via `OUTLOOK_JUNK_GROQ_MODEL`; smaller / less-capable models
-are more likely to drift off the `{action, confidence, reason}` shape and land in
-Ambiguous@0.0 fallback on bad output, which is the safe behaviour.
+plus a per-day token cap (~100k TPD). On a 429 the driver retries with exponential backoff and
+respects `Retry-After`; on a TPD-style throttle where the wait would exceed the remaining run
+budget, the driver fails over to the next model in `OUTLOOK_JUNK_GROQ_MODEL` rather than
+aborting. Combined with the heuristic-first pass, that gives roughly 2× daily classification
+headroom before any run actually has to abort. The driver uses `response_format: json_object`
+so any Groq model that supports that mode (essentially all of them) will work as a substitute;
+smaller / less-capable models are more likely to drift off the `{action, confidence, reason}`
+shape and land in Ambiguous@0.0 fallback on bad output, which is the safe behaviour.
 
 ## Local LLM via Ollama
 

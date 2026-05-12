@@ -19,7 +19,12 @@ public static class DriverFactory
     // drivers produce. Strict json_schema is gated to a small list of Groq models that does
     // not include this one. Free-tier ToS reserves the right to use inputs/outputs for service
     // improvement — see README.
-    public const string DefaultGroqModel = "llama-3.3-70b-versatile";
+    //
+    // Default is a comma-separated fallback chain: when llama-3.3-70b-versatile exhausts its
+    // daily token budget, the driver fails over to llama-3.1-8b-instant (separate TPD bucket)
+    // so the run can keep classifying instead of aborting. Override via OUTLOOK_JUNK_GROQ_MODEL
+    // with either a single name or a comma-separated list.
+    public const string DefaultGroqModel = "llama-3.3-70b-versatile,llama-3.1-8b-instant";
 
     public static IAgentDriver Create(ILoggerFactory loggerFactory, out string providerName, out string model)
     {
@@ -51,12 +56,24 @@ public static class DriverFactory
                 var apiKey = Environment.GetEnvironmentVariable(EnvVars.GroqApiKey)
                     ?? throw new InvalidOperationException(
                         $"{EnvVars.GroqApiKey} is not set. Required for the Groq driver.");
-                model = Environment.GetEnvironmentVariable(EnvVars.GroqModel) ?? DefaultGroqModel;
+                var modelSpec = Environment.GetEnvironmentVariable(EnvVars.GroqModel) ?? DefaultGroqModel;
+                var models = modelSpec
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .ToList();
+                if (models.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"{EnvVars.GroqModel} resolved to an empty model list. " +
+                        $"Supply one model name or a comma-separated fallback chain.");
+                }
+                // Report the full chain to the run summary so users can see which models are
+                // in scope without having to dig through env vars.
+                model = string.Join(",", models);
                 // Groq llama-3.3-70b-versatile with 256 max_completion_tokens typically replies in
                 // 1-5s. A tight per-attempt HTTP timeout means a single wedged TCP connection can't
                 // burn through the 9-minute outer run cap before the retry loop notices and fails over.
                 var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-                return new GroqAgentDriver(http, apiKey, model, loggerFactory.CreateLogger<GroqAgentDriver>());
+                return new GroqAgentDriver(http, apiKey, models, loggerFactory.CreateLogger<GroqAgentDriver>());
             }
             default:
                 throw new NotSupportedException(
