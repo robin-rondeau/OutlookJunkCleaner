@@ -107,7 +107,7 @@ Both files are loaded at startup. SHA-256 of each is logged with each run so sil
 | `move_to_triage(id, reason)` | Move from Junk → Triage with a reason. Action for ambiguous mail in both phases. The Triage folder lives under Inbox (`Inbox\Triage`) so Outlook clients badge its unread count. | yes | yes |
 | `list_triage(limit?)` | List items currently in Triage so the agent can see what's outstanding | yes | yes |
 | `get_status()` | `{ junkCount, junkUnreadCount, triageCount, deleteEnabled, allowedFolders }` | yes | yes |
-| `lookup_classification_status(ids[])` | For each id, return the current bucket: `junk` / `triage` / `deleted` / `inbox` / `archive` / `other` / `not_found`. Read-only; bypasses the per-session id allow-set so the host can follow up on ids surfaced in *previous* runs. Powers the Phase-A accuracy block. | yes | yes |
+| `lookup_classification_status(ids[])` | For each id, return the current bucket: `junk` / `triage` / `deleted` / `inbox` / `archive` / `other`. Read-only; bypasses the per-session id allow-set so the host can follow up on ids surfaced in *previous* runs. Powers the Phase-A accuracy block. `deleted` collapses Deleted Items and Graph-404 (the recoverable-items dumpster a Junk-direct delete falls into on consumer Outlook): both mean "user didn't rescue it," which is the signal the metric needs. | yes | yes |
 | `delete_from_junk(id, reason)` | Move from Junk → Deleted Items (recoverable ~30 days) | **not registered** | registered |
 
 Hard invariants (compiled in, not negotiable from the agent side):
@@ -123,7 +123,7 @@ Hard invariants (compiled in, not negotiable from the agent side):
 Phase-A graduation is data-driven via the `classification audit` block printed in every run summary. The block is computed by looking up each past classification's current location via `lookup_classification_status` and aggregating:
 
 - **Confident-junk rescue rate** (`(in inbox + in archive) / total`) is the false-positive floor that will carry forward into Phase B if you flip the env var today. It's the metric that should govern graduation.
-- **Triage missed-junk rate** (`(in deleted + not_found) / total`) is the rate at which the agent routed something to Triage that you ended up deleting — i.e. should have been `confident_junk`. Useful for tuning the rubric and the trusted/junk lists.
+- **Triage missed-junk rate** (`deleted / total`) is the rate at which the agent routed something to Triage that you ended up deleting — i.e. should have been `confident_junk`. Useful for tuning the rubric and the trusted/junk lists. `deleted` here is the collapsed bucket: it covers both Deleted Items and the recoverable-items dumpster (a Graph 404 on lookup) so it captures the user's "remove this" signal regardless of whether the message went through Deleted Items first or was hard-deleted from Junk.
 
 When you're satisfied, set `OUTLOOK_JUNK_MCP_ALLOW_DELETE=1` in the Task Scheduler action's environment. The MCP server registers `delete_from_junk` on next run; no rebuild. The host detects this at startup (the discovered tool list contains `delete_from_junk`) and routes `confident_junk` decisions to the delete tool instead of `mark_as_read`. The change is auditable (lives in the task definition). Update `rubric.md` at the same time to tell yourself what bar the classifier must meet before deletion is appropriate.
 

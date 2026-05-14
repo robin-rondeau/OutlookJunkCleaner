@@ -139,6 +139,12 @@ public sealed class MailClient
     /// previous (now-terminated) sessions whose SurfacedIds set is gone. The resulting info leak
     /// is bounded to "what folder bucket is this message id in" — no body, sender, subject, or
     /// other content. Mutating tools still require SurfacedIds membership.
+    ///
+    /// A 404 from Graph (the message no longer exists in any folder Graph exposes) is bucketed
+    /// as "deleted" rather than its own state: on consumer Outlook, a message deleted directly
+    /// from Junk skips Deleted Items and goes to the server-side recoverable-items dumpster,
+    /// which is not reachable via Graph — so the only signal we get back is a 404. Treating
+    /// that as "deleted" is the honest accuracy-metric reading. See <see cref="FolderResolver.GetBucket"/>.
     /// </summary>
     public async Task<IReadOnlyList<ClassificationLookupEntry>> LookupClassificationStatusAsync(
         IReadOnlyList<string> ids, CancellationToken ct)
@@ -155,7 +161,7 @@ public sealed class MailClient
             ct.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(id))
             {
-                results.Add(new ClassificationLookupEntry(id ?? "", "not_found"));
+                results.Add(new ClassificationLookupEntry(id ?? "", "deleted"));
                 continue;
             }
             try
@@ -168,7 +174,7 @@ public sealed class MailClient
             }
             catch (Microsoft.Graph.Models.ODataErrors.ODataError ex) when (ex.ResponseStatusCode == 404)
             {
-                results.Add(new ClassificationLookupEntry(id, "not_found"));
+                results.Add(new ClassificationLookupEntry(id, "deleted"));
             }
         }
         return results;

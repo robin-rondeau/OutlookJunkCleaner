@@ -53,7 +53,11 @@ public static class AccuracyComputer
 
         foreach (var e in eligible)
         {
-            var loc = locations.TryGetValue(e.MessageId, out var l) ? l : "not_found";
+            // Default to "deleted" rather than "not_found": the server now collapses both
+            // "no parent folder" and a Graph 404 into "deleted" (see FolderResolver.GetBucket).
+            // If a host-side dict miss still occurs (it shouldn't), treating it the same way
+            // keeps the metric internally consistent rather than introducing a phantom bucket.
+            var loc = locations.TryGetValue(e.MessageId, out var l) ? l : "deleted";
             switch (e.AgentDecision)
             {
                 case "confident_junk":
@@ -98,8 +102,12 @@ public sealed record AccuracyReport(
 {
     public int ConfidentTotal => Sum(ConfidentByLocation);
     public int ConfidentRescued => Get(ConfidentByLocation, "inbox") + Get(ConfidentByLocation, "archive");
+    public int ConfidentDeleted => Get(ConfidentByLocation, "deleted");
+    public int ConfidentStillInJunk => Get(ConfidentByLocation, "junk");
     public int TriageTotal => Sum(TriageByLocation);
-    public int TriageMissedJunk => Get(TriageByLocation, "deleted") + Get(TriageByLocation, "not_found");
+    // "deleted" covers Deleted Items + Graph-404 (recoverable-items dumpster / hard-delete from
+    // Junk). Both mean the user did not rescue the message, which is the signal we care about.
+    public int TriageMissedJunk => Get(TriageByLocation, "deleted");
 
     public bool HasData => !LookupFailed && (ConfidentTotal > 0 || TriageTotal > 0);
 
@@ -133,9 +141,13 @@ public sealed record AccuracyReport(
 
         if (ConfidentTotal > 0)
         {
-            var pct = ConfidentRescued * 100.0 / ConfidentTotal;
+            var rescuedPct = ConfidentRescued * 100.0 / ConfidentTotal;
+            var deletedPct = ConfidentDeleted * 100.0 / ConfidentTotal;
+            var stillJunkPct = ConfidentStillInJunk * 100.0 / ConfidentTotal;
             sb.AppendLine($"  confident_junk decisions: N={ConfidentTotal}");
-            sb.AppendLine($"    rescued to inbox/archive: {ConfidentRescued} ({pct:F1}%)  <- Phase B false-positive floor");
+            sb.AppendLine($"    rescued to inbox/archive: {ConfidentRescued} ({rescuedPct:F1}%)  <- Phase B false-positive floor");
+            sb.AppendLine($"    user-deleted: {ConfidentDeleted} ({deletedPct:F1}%)  <- user agreed it was junk");
+            sb.AppendLine($"    still in junk: {ConfidentStillInJunk} ({stillJunkPct:F1}%)");
             sb.AppendLine($"    locations: {FormatLocations(ConfidentByLocation)}");
         }
 
@@ -162,7 +174,7 @@ public sealed record AccuracyReport(
 
     private static string FormatLocations(IReadOnlyDictionary<string, int> d)
     {
-        var order = new[] { "junk", "triage", "deleted", "inbox", "archive", "other", "not_found" };
+        var order = new[] { "junk", "triage", "deleted", "inbox", "archive", "other" };
         var parts = new List<string>(order.Length);
         foreach (var k in order)
         {

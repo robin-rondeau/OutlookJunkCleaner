@@ -87,7 +87,7 @@ public sealed class JunkTools
     }
 
     [McpServerTool(Name = "lookup_classification_status")]
-    [Description("Look up the current folder bucket for each supplied message ID. Returns one entry per ID with location set to 'junk', 'triage', 'deleted', 'inbox', 'archive', 'other', or 'not_found'. Read-only; intended for the host to compute Phase A classifier accuracy by following up on past classifications. Does not require IDs to be surfaced in the current session.")]
+    [Description("Look up the current folder bucket for each supplied message ID. Returns one entry per ID with location set to 'junk', 'triage', 'deleted', 'inbox', 'archive', or 'other'. 'deleted' covers both the Deleted Items folder and the recoverable-items dumpster (a message purged directly from Junk on consumer Outlook returns a Graph 404, which we bucket as deleted because both states mean 'user did not rescue it'). Read-only; intended for the host to compute Phase A classifier accuracy by following up on past classifications. Does not require IDs to be surfaced in the current session.")]
     public async Task<string> LookupClassificationStatus(
         [Description("Message IDs to look up. Maximum 500 per call.")] string[] ids,
         CancellationToken ct = default)

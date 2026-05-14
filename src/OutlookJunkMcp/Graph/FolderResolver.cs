@@ -148,10 +148,18 @@ public sealed class FolderResolver
     /// status lookup tool to feed Phase A accuracy metrics. Buckets are intentionally fewer than
     /// real folders so the host (and its log output) doesn't have to know about every Outlook
     /// folder layout the user might create.
+    ///
+    /// "deleted" is used for both the Deleted Items folder *and* the case where the message no
+    /// longer has a parent folder Graph can see — i.e. it has been purged out of the regular
+    /// folder hierarchy entirely. On consumer Outlook this is the normal terminal state for a
+    /// message deleted directly from Junk, because that path skips Deleted Items and goes
+    /// straight to the server-side recoverable-items dumpster, which Graph does not expose. From
+    /// the accuracy-metric standpoint both cases mean the same thing: "user purged this, did
+    /// not rescue it," so collapsing them keeps the audit honest.
     /// </summary>
     public string GetBucket(string? parentFolderId)
     {
-        if (string.IsNullOrEmpty(parentFolderId)) return "not_found";
+        if (string.IsNullOrEmpty(parentFolderId)) return "deleted";
         if (parentFolderId == JunkFolderId) return "junk";
         if (parentFolderId == TriageFolderId) return "triage";
         if (parentFolderId == DeletedItemsFolderId) return "deleted";

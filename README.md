@@ -64,9 +64,13 @@ Tool surface (Phase A):
 - `mark_as_read(id, reason)` - confident-junk action in Phase A
 - `move_to_triage(id, reason)` - ambiguous-mail action in either phase
 - `get_status()`
-- `lookup_classification_status(ids[])` - bucket each id into junk/triage/deleted/inbox/archive/other/not_found.
+- `lookup_classification_status(ids[])` - bucket each id into junk/triage/deleted/inbox/archive/other.
   Used by the host to compute Phase-A accuracy from past classifications. Read-only; bypasses the
-  per-session id allow-set so the host can follow up on ids surfaced in *previous* runs.
+  per-session id allow-set so the host can follow up on ids surfaced in *previous* runs. `deleted`
+  covers both the Deleted Items folder and the server-side recoverable-items dumpster — a message
+  the user deletes directly from Junk bypasses Deleted Items on consumer Outlook and Graph returns
+  a 404 for the id, which we bucket as `deleted` because the signal is the same: user did not
+  rescue it.
 
 Phase B adds:
 - `delete_from_junk(id, reason)` - moves to Deleted Items (recoverable ~30 days)
@@ -221,7 +225,10 @@ unread = agent hasn't seen it yet. Watch for ~1 week, edit `rubric.md` (narrativ
 The run summary in `logs\YYYY-MM-DD.log` includes a `classification audit` block computed from
 `state\history.jsonl`: of the messages the agent called `confident_junk` 48h-30d ago, how many
 were rescued by the user to Inbox/Archive (your false-positive rate, the actual gate for Phase
-B promotion), how many were deleted, how many are still in Junk. The block also reports the
+B promotion), how many were deleted, how many are still in Junk. "Deleted" includes both items
+the user moved to Deleted Items and items the user purged directly from Junk (which on consumer
+Outlook skip Deleted Items and go straight to the server-side recoverable-items dumpster — both
+mean the same thing for the metric: the user agreed it was junk). The block also reports the
 missed-junk rate on triage decisions (messages the agent routed to Triage that you ended up
 deleting). Graduate when the rescue rate is acceptably low for *your* tolerance.
 
