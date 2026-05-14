@@ -73,6 +73,29 @@ public sealed class Spotlighter
             sb.AppendLine($"reply-to:         {Escape(replyTo)}");
         }
 
+        // RFC 5322 Sender: header is only emitted when present. Absent ⇒ the From: author
+        // is also the agent of submission, which is the common case and not worth a noise
+        // line. When present, the rubric should compare it against sender-domain: above to
+        // detect relayed mail (calendar invites, mailing-list relays).
+        var senderHeader = details.RelevantHeaders
+            .FirstOrDefault(h => string.Equals(h.Name, "Sender", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        if (!string.IsNullOrEmpty(senderHeader))
+        {
+            sb.AppendLine($"sender-header:    {Escape(senderHeader)}");
+        }
+
+        // RFC 3834 Auto-Submitted: only emitted when present. Real human-to-human mail
+        // never sets this; anything non-empty (auto-generated, auto-replied,
+        // auto-notified) is a "machine wrote this" signal.
+        var autoSubmitted = details.RelevantHeaders
+            .FirstOrDefault(h => string.Equals(h.Name, "Auto-Submitted", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        if (!string.IsNullOrEmpty(autoSubmitted))
+        {
+            sb.AppendLine($"auto-submitted:   {Escape(autoSubmitted.Trim())}");
+        }
+
         if (details.Images.Count > 0)
         {
             sb.AppendLine($"images ({details.Images.Count}):");

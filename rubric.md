@@ -39,6 +39,23 @@ list above also qualify on their own; `reason` may be brief, e.g. "in known-junk
     `confident_junk` and name "EOP SCL=N" in the reason. SCL of `-1` means EOP skipped
     filtering (trusted internal mail) and is not a junk signal; missing / `<none>`
     means no SCL header was present and carries no weight either way.
+- **Calendar-invite spam (auto-submitted relayed mail).** Junk that arrives as an actual
+  calendar invite — typically via a free Google Calendar account, occasionally Outlook
+  Calendar or iCloud Calendar — to abuse Outlook's "tentatively add this to your calendar"
+  behaviour. The canonical signature is `auto-submitted:` is `auto-generated` AND
+  `sender-header:` points at a known calendar relay (`calendar-notification@google.com`,
+  `noreply@email.apple.com`, similar) AND `sender-domain:` (the From-domain) is unfamiliar
+  — i.e. not a domain the user corresponds with and not on the trusted list. Treat the
+  combination as `confident_junk`; name "calendar-invite from stranger via <relay>" in the
+  reason. Real calendar invites from coworkers / contacts also match the first two
+  conditions, so the unfamiliar-From-domain piece is load-bearing: an invite from a
+  trusted-list domain or from a personal contact's domain is NOT junk and should route to
+  Triage (or `not_junk`) instead. Additional corroborating signals when present — a
+  generic "global / center / hub / notify" From-domain with no business identity, a
+  display-name that's a stock personal first/last (`James Miller`, `Sarah Anderson`),
+  homoglyph brand names in the body (`N0RT0N`, `PayPa1`, `Micr0soft`), or a billing /
+  renewal / refund / "agent will call you" narrative — only strengthen the case.
+
 - **Affiliate / drive-by marketing patterns** (any TWO together = `confident_junk`; any one
   alone = `ambiguous`). ESP-relay caveat: `sendgrid.net`, `mailgun.org`, `amazonses.com` and
   similar shared relays don't qualify for the sender-domain signals on their own.
@@ -61,6 +78,11 @@ list above also qualify on their own; `reason` may be brief, e.g. "in known-junk
   Tie-breakers (don't count toward the two-of; mention in `reason` only):
   - `list-unsubscribe: <none>` AND no unsubscribe link in body.
   - `reply-to:` domain differs from `sender-domain:`.
+  - `auto-submitted:` is set (auto-generated / auto-replied). Normal marketing mail
+    usually doesn't bother; its presence on a non-calendar promotional message is mildly
+    suspicious.
+  - `sender-header:` differs from `sender-domain:` and the sender-header host is not an
+    expected ESP relay for the claimed brand. Indicates third-party-relayed mail.
 
 ## Definite-not-junk patterns
 

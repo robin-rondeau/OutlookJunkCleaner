@@ -184,6 +184,93 @@ public class SpotlighterTests
         Assert.DoesNotContain("microsoft-spam-confidence:   7", output);
     }
 
+    [Fact]
+    public void SenderHeaderEmittedWhenPresent()
+    {
+        // Sender: differs from From: on relayed mail (calendar invites via Google Calendar,
+        // mailing-list software, etc.). When present the rubric uses it to detect
+        // calendar-invite spam; absent, the From: author is also the agent of submission and
+        // we save a line of noise.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body") with
+        {
+            RelevantHeaders = new[]
+            {
+                new HeaderRef("Sender", "Google Calendar <calendar-notification@google.com>"),
+            },
+        };
+        var output = s.Wrap(msg);
+        Assert.Contains("sender-header:    Google Calendar <calendar-notification@google.com>", output);
+    }
+
+    [Fact]
+    public void SenderHeaderNotEmittedWhenAbsent()
+    {
+        // Common case: Sender: header absent → the line is omitted entirely. We do NOT emit
+        // "sender-header: <none>" because that pattern would appear on the vast majority of
+        // mail and waste prompt budget on a non-signal.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body");
+        var output = s.Wrap(msg);
+        Assert.DoesNotContain("sender-header:", output);
+    }
+
+    [Fact]
+    public void AutoSubmittedEmittedAndTrimmedWhenPresent()
+    {
+        // Auto-Submitted: marks machine-generated mail (auto-generated, auto-replied,
+        // auto-notified). Surfacing it lets the rubric distinguish calendar invites and
+        // autoresponders from human-authored mail.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body") with
+        {
+            RelevantHeaders = new[]
+            {
+                new HeaderRef("Auto-Submitted", "  auto-generated  "),
+            },
+        };
+        var output = s.Wrap(msg);
+        Assert.Contains("auto-submitted:   auto-generated", output);
+        Assert.DoesNotContain("auto-submitted:     auto-generated", output);
+    }
+
+    [Fact]
+    public void AutoSubmittedNotEmittedWhenAbsent()
+    {
+        // Same noise-reduction reasoning as Sender: above. Real personal mail never sets
+        // Auto-Submitted, so emitting "<none>" on every message is just noise.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body");
+        var output = s.Wrap(msg);
+        Assert.DoesNotContain("auto-submitted:", output);
+    }
+
+    [Fact]
+    public void CalendarInviteSpamSurfacesAllThreeSignalsTogether()
+    {
+        // End-to-end sanity check on the canonical calendar-invite-spam shape: an
+        // auto-generated message relayed via Google Calendar with an unrelated From-domain.
+        // The Spotlighter should emit sender-header:, auto-submitted:, and the From-domain
+        // on its existing sender-domain: line so the rubric can correlate all three.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("Your subscription continues...") with
+        {
+            Sender = "miller.james48423@globalupdatecenter.com",
+            SenderDomain = "globalupdatecenter.com",
+            RelevantHeaders = new[]
+            {
+                new HeaderRef("Sender", "Google Calendar <calendar-notification@google.com>"),
+                new HeaderRef("Auto-Submitted", "auto-generated"),
+                new HeaderRef("Message-ID", "<calendar-65444fee@google.com>"),
+            },
+        };
+        var output = s.Wrap(msg);
+        Assert.Contains("sender-domain:    globalupdatecenter.com", output);
+        Assert.Contains("sender-header:    Google Calendar <calendar-notification@google.com>", output);
+        Assert.Contains("auto-submitted:   auto-generated", output);
+        Assert.Contains("message-id:       <calendar-65444fee@google.com>", output);
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;

@@ -336,6 +336,19 @@ public sealed class MailClient
             // classified this as spam server-side; surfacing it lets the rubric weight
             // that verdict against borderline downgrades to ambiguous.
             "X-MS-Exchange-Organization-SCL",
+            // RFC 5322 Sender: header — the agent of submission, distinct from From: (the
+            // author). When present and pointing at a different domain than From:, the
+            // message was relayed on behalf of From: (calendar invites via
+            // calendar-notification@google.com, mailing-list software, etc.). A divergence
+            // between sender-header and the From-domain is a strong calendar-invite-spam
+            // signature when combined with an unfamiliar From-domain.
+            "Sender",
+            // RFC 3834 Auto-Submitted: marks machine-generated mail (auto-generated,
+            // auto-replied, auto-notified). Calendar invites, vacation autoresponders,
+            // bounce notifications, etc. all set this. Real personal correspondence
+            // never does, so it's a useful "this is not a human writing to me" signal
+            // even though it's not junk on its own.
+            "Auto-Submitted",
         };
         var headers = msg?.InternetMessageHeaders;
         if (headers is null) return [];
