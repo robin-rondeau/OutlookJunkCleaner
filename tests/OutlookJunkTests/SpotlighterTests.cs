@@ -135,6 +135,55 @@ public class SpotlighterTests
         Assert.Contains("[delim]", output);
     }
 
+    [Fact]
+    public void MicrosoftSpamConfidenceLineEmittedWhenSclHeaderPresent()
+    {
+        // EOP populates X-MS-Exchange-Organization-SCL with an integer 0–9 (-1 means filtering
+        // was skipped). The Spotlighter must surface this so the rubric can refer to it; the
+        // line is named microsoft-spam-confidence: regardless of the underlying header name so
+        // the rubric is not coupled to Microsoft's wire format.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body") with
+        {
+            RelevantHeaders = new[]
+            {
+                new HeaderRef("X-MS-Exchange-Organization-SCL", "6"),
+            },
+        };
+        var output = s.Wrap(msg);
+        Assert.Contains("microsoft-spam-confidence: 6", output);
+    }
+
+    [Fact]
+    public void MicrosoftSpamConfidenceLineEmittedAsNoneWhenSclHeaderMissing()
+    {
+        // No SCL header (e.g. non-Microsoft inbound path) must not be confused with an SCL of
+        // zero. The rubric distinguishes <none> (carry no weight) from a real low value.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body"); // no RelevantHeaders
+        var output = s.Wrap(msg);
+        Assert.Contains("microsoft-spam-confidence: <none>", output);
+    }
+
+    [Fact]
+    public void MicrosoftSpamConfidenceLineWhitespaceIsTrimmed()
+    {
+        // Header values can arrive with leading/trailing whitespace (some MIME folders leave a
+        // space after the colon). The emitted value is trimmed so the rubric matches on a clean
+        // integer.
+        var s = new Spotlighter(FixedRunToken);
+        var msg = BuildMessage("body") with
+        {
+            RelevantHeaders = new[]
+            {
+                new HeaderRef("X-MS-Exchange-Organization-SCL", "  7  "),
+            },
+        };
+        var output = s.Wrap(msg);
+        Assert.Contains("microsoft-spam-confidence: 7", output);
+        Assert.DoesNotContain("microsoft-spam-confidence:   7", output);
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;

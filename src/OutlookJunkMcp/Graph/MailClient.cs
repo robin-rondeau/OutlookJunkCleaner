@@ -332,6 +332,10 @@ public sealed class MailClient
             "List-Unsubscribe", "List-Unsubscribe-Post", "List-Id",
             "Authentication-Results", "Received-SPF", "DKIM-Signature",
             "Return-Path", "Reply-To", "Message-ID",
+            // Microsoft's upstream spam-confidence score. SCL >= 5 means EOP already
+            // classified this as spam server-side; surfacing it lets the rubric weight
+            // that verdict against borderline downgrades to ambiguous.
+            "X-MS-Exchange-Organization-SCL",
         };
         var headers = msg?.InternetMessageHeaders;
         if (headers is null) return [];

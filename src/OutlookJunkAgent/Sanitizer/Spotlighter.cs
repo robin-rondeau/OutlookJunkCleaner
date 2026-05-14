@@ -57,6 +57,14 @@ public sealed class Spotlighter
             ?.Value;
         sb.AppendLine($"message-id:       {Escape(messageId ?? "<none>")}");
 
+        // Microsoft EOP's spam-confidence level (SCL). Integer; 5+ means EOP classified the
+        // message as spam upstream, 7+ is high-confidence spam, -1 is trusted (skipped
+        // filtering). We pass the raw value through so the rubric can refer to it directly.
+        var scl = details.RelevantHeaders
+            .FirstOrDefault(h => string.Equals(h.Name, "X-MS-Exchange-Organization-SCL", StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        sb.AppendLine($"microsoft-spam-confidence: {Escape(scl?.Trim() ?? "<none>")}");
+
         var replyTo = details.RelevantHeaders
             .FirstOrDefault(h => string.Equals(h.Name, "Reply-To", StringComparison.OrdinalIgnoreCase))
             ?.Value;

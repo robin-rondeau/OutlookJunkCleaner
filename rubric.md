@@ -30,6 +30,15 @@ list above also qualify on their own; `reason` may be brief, e.g. "in known-junk
     `%FIRSTNAME%`, `{{token}}`, etc. This is a leaked mail-merge variable from the
     spammer's pipeline; legitimate senders never emit unfilled placeholders. Strong
     standalone `confident_junk` signal.
+  - `microsoft-spam-confidence:` is `5` or higher. This is Exchange Online Protection's
+    upstream verdict (the SCL header); it scores 0–9 where 5–6 is "spam" and 7–9 is
+    "high-confidence spam". When SCL ≥ 5, **do not downgrade to `ambiguous`** without
+    a positive trusted-sender signal — i.e. the From-domain matches an entry on the
+    trusted list above, or the body is unambiguously transactional from a service the
+    user has clearly opted into. Absent such a rescue signal, treat SCL ≥ 5 as
+    `confident_junk` and name "EOP SCL=N" in the reason. SCL of `-1` means EOP skipped
+    filtering (trusted internal mail) and is not a junk signal; missing / `<none>`
+    means no SCL header was present and carries no weight either way.
 - **Affiliate / drive-by marketing patterns** (any TWO together = `confident_junk`; any one
   alone = `ambiguous`). ESP-relay caveat: `sendgrid.net`, `mailgun.org`, `amazonses.com` and
   similar shared relays don't qualify for the sender-domain signals on their own.
